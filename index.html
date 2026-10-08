@@ -12343,7 +12343,7 @@ const App = {
                     <div class="flex gap-1 flex-wrap">
                         <button onclick="App.openRoundPairings('${r.roundId}','${targetDiv.divisionId}')" class="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded">${this.ui('Pairings','คู่แข่งขัน')}</button>
                         ${!RoundRobinFullScheduleService.isPreset(targetDiv.divisionId) && r.status==='pairing_confirmed' && results.length===0?`<button onclick="App.reopenPairings('${r.roundId}')" class="text-xs px-2 py-1 bg-amber-100 text-amber-800 rounded">${this.ui('Reopen Pairings','เปิดแก้ไขคู่แข่งขัน')}</button>`:''}
-                        ${r.status==='pairing_confirmed'?`<button onclick="App.startRound('${r.roundId}')" class="text-xs px-2 py-1 bg-green-100 text-green-700 rounded">Start</button>`:''}
+                        ${r.status==='pairing_confirmed'?`<button ${rounds.some(prev=>Number(prev.roundNumber)===Number(r.roundNumber)-1 && prev.status!=='locked')?'disabled title="Lock the previous round first"':''} onclick="App.startRoundFromPairings('${r.roundId}')" class="text-xs px-2 py-1 rounded ${rounds.some(prev=>Number(prev.roundNumber)===Number(r.roundNumber)-1 && prev.status!=='locked')?'bg-gray-200 text-gray-500 cursor-not-allowed':'bg-green-100 text-green-700'}">${this.ui('Start','เริ่มรอบ')}</button>`:''}
                         ${r.status==='draft'?`<button onclick="App.deleteRound('${r.roundId}')" class="text-xs px-2 py-1 bg-red-100 text-red-700 rounded">${this.ui('Delete Round','ลบรอบ')}</button>`:''}
                         ${r.status==='in_progress'||r.status==='results_pending'||r.status==='completed'?`<button onclick="App.currentDivisionId='${targetDiv.divisionId}';App.navigate('results')" class="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded">${this.ui('Results','ผลการแข่งขัน')}</button>`:''}
                         ${(r.status==='completed'||r.status==='in_progress')&&allPairingResultsComplete&&roundResultIntegrity.ok?`<button onclick="App.lockRound('${r.roundId}')" class="text-xs px-2 py-1 bg-purple-100 text-purple-700 rounded">Lock</button>`:''}
@@ -13608,6 +13608,16 @@ const App = {
                     <span class="status-badge ${activeRound.status==='locked'?'bg-purple-100 text-purple-800':'bg-blue-100 text-blue-800'}">${activeRound.status}</span>
                 </div>
             </div>
+
+            ${activeRound.status === 'pairing_confirmed' ? (() => {
+                const previousRound = rounds.find(r => Number(r.roundNumber) === Number(activeRound.roundNumber) - 1);
+                const canStart = !previousRound || previousRound.status === 'locked';
+                return `<div class="card rounded-xl p-4 border ${canStart?'border-emerald-400 bg-emerald-50 dark:bg-emerald-950/30':'border-amber-400 bg-amber-50 dark:bg-amber-950/30'} flex flex-wrap items-center justify-between gap-3">
+                    <div><p class="font-semibold">${this.ui('Pairings confirmed — round not started','ยืนยันคู่แล้ว — ยังไม่ได้เริ่มรอบการแข่งขัน')}</p>
+                    <p class="text-sm mt-1">${canStart?this.ui('Start this round before entering scores.','กดเริ่มรอบการแข่งขันก่อน จึงจะกรอกคะแนนได้'):this.ui(`Round ${previousRound.roundNumber} must be locked before starting this round.`,`ต้องล็อกรอบที่ ${previousRound.roundNumber} ก่อน จึงจะเริ่มรอบนี้ได้`)}</p></div>
+                    ${canStart?`<button onclick="App.startRoundFromPairings('${activeRound.roundId}')" class="px-4 py-2 bg-emerald-600 text-white rounded-lg font-semibold">▶ ${this.ui('Start Round','เริ่มรอบการแข่งขัน')}</button>`:`<button onclick="App.navigate('rounds')" class="px-4 py-2 border rounded-lg">${this.ui('View Rounds','ดูรอบการแข่งขัน')}</button>`}
+                </div>`;
+            })() : ''}
 
             <div class="card rounded-xl px-4 py-3 bg-white dark:bg-gray-800 border ${normalPendingCount > 0 ? 'border-red-300 dark:border-red-900' : (activeRound.status==='locked' ? 'border-emerald-300 dark:border-emerald-900' : 'border-amber-300 dark:border-amber-900')}">
                 <div class="flex flex-wrap items-center justify-between gap-3">
