@@ -8406,6 +8406,86 @@ const PairingContextBuilder = {
 };
 
 
+// KTM RC5.10.29.5 — Round Robin full-schedule commitment.
+// Generate all rounds atomically when Division starts; later rounds are pre-confirmed,
+// but only the current round may be started after its predecessor is locked.
+const RoundRobinFullScheduleService = {
+    isPreset(divisionId) {
+        const d=DivisionService.getById(divisionId);
+        if (!d) return false;
+        const plan=Storage.getById('pairingPlans','pairingPlanId',d.pairingPlanId);
+        return PairingPlanPresetService.detect(plan,d.totalRounds)==='round_robin';
+    },
+    create(divisionId) {
+        const d=DivisionService.getById(divisionId);
+        if (!d || !this.isPreset(divisionId)) return {errors:['Round Robin preset is required.']};
+        if (RoundService.getByDivision(divisionId).length || Storage.find('pairings',p=>p.divisionId===divisionId).length)
+            return {errors:['Division already has rounds or pairing history; full schedule cannot overwrite it.']};
+        const regs=RegistrationService.getEligible(divisionId).slice().sort((a,b)=>(a.seed||9999)-(b.seed||9999)||String(a.playerId).localeCompare(String(b.playerId)));
+        const capacity=RoundRobinCapacityService.capacityForPlayerCount(regs.length);
+        if (!capacity.valid) return {errors:[capacity.error]};
+        if (Number(d.totalRounds)!==capacity.cycleLength)
+            return {errors:[`Round Robin requires ${capacity.cycleLength} rounds for ${regs.length} players; Division has ${d.totalRounds}. Change Total Rounds before starting.`]};
+        if (new Set(regs.map(r=>r.playerId)).size!==regs.length) return {errors:['Duplicate eligible player IDs.']};
+        const padded=regs.slice(); if (padded.length%2) padded.push({playerId:'BYE',registrationId:'BYE'});
+        const n=padded.length, fixed=padded[0], rotating=padded.slice(1);
+        const scheduled=[], meetings=new Set(), byes=new Set();
+        for(let k=0;k<capacity.cycleLength;k++) {
+            const arranged=[fixed,...rotating.map((_,i)=>rotating[((i-k)%rotating.length+rotating.length)%rotating.length])];
+            const pairs=[];
+            for(let i=0;i<n/2;i++) {
+                const a=arranged[i], b=arranged[n-1-i];
+                if(a.playerId==='BYE'||b.playerId==='BYE') {
+                    const real=a.playerId==='BYE'?b:a;
+                    if(byes.has(real.playerId)) return {errors:['Duplicate BYE detected.']};
+                    byes.add(real.playerId);
+                    pairs.push({pairingType:'bye',player1RegistrationId:real.registrationId,player1Id:real.playerId});
+                } else {
+                    const key=[a.playerId,b.playerId].sort().join('|');
+                    if(meetings.has(key)) return {errors:['Duplicate opponents detected.']};
+                    meetings.add(key);
+                    // Display-side alternation is cosmetic, NOT a first-player/start assignment.
+                    const left=(k%2===1)?b:a, right=(k%2===1)?a:b;
+                    pairs.push({pairingType:'normal',player1RegistrationId:left.registrationId,player1Id:left.playerId,player2RegistrationId:right.registrationId,player2Id:right.playerId});
+                }
+            }
+            const seen=new Set(pairs.flatMap(x=>[x.player1Id,x.player2Id].filter(Boolean)));
+            if(seen.size!==regs.length) return {errors:[`Round ${k+1} does not cover the complete roster.`]};
+            scheduled.push([...pairs.filter(p=>p.pairingType!=='bye'),...pairs.filter(p=>p.pairingType==='bye')]);
+        }
+        if(meetings.size!==regs.length*(regs.length-1)/2 || (regs.length%2 && byes.size!==regs.length))
+            return {errors:['Full-schedule uniqueness/completeness check failed.']};
+        const backup=JSON.parse(JSON.stringify(Storage.exportAll()));
+        try {
+            scheduled.forEach((pairs,k)=>{
+                const round={roundId:Utils.generateId('RND'),tournamentId:d.tournamentId,divisionId,
+                    pairingPlanId:d.pairingPlanId,pairingPlanVersion:1,roundNumber:k+1,roundLabel:`Round ${k+1}`,
+                    plannedPairingMethod:'round_robin',actualPairingMethod:'round_robin',standingInputRound:k||null,
+                    standingInputSnapshotId:null,status:'pairing_confirmed',scheduledDate:'',scheduledStartTime:'',
+                    actualStartAt:null,completedAt:null,lockedAt:null,expectedPairingCount:pairs.length,
+                    notes:'Round Robin full schedule — pre-confirmed at Division start',createdAt:Utils.now(),updatedAt:Utils.now(),createdBy:'admin',updatedBy:'admin'};
+                Storage.insert('rounds',round);
+                pairs.forEach((pair,i)=>{
+                    const result=PairingService.create({...pair,tournamentId:d.tournamentId,divisionId,roundId:round.roundId,
+                        roundNumber:k+1,tableNumber:Number(d.startingTableNumber||1)+i,generatedMethod:'round_robin',generatedBy:'round_robin_full_schedule',
+                        engineMetadata:{engine:'round_robin',algorithm:'circle_method',fullSchedule:true,roundIndex:k}});
+                    if(result.errors?.length) throw new Error(result.errors.join('; '));
+                    Storage.update('pairings','pairingId',result.data.pairingId,{status:'confirmed'});
+                });
+                const validation=PairingService.validateRound(round.roundId);
+                if(!validation.valid) throw new Error(`Round ${k+1}: ${validation.errors.join('; ')}`);
+            });
+            Storage.update('divisions','divisionId',divisionId,{currentRound:1,rrFullScheduleCommittedAt:Utils.now(),rrFullScheduleRoster:regs.map(r=>r.registrationId)});
+            AuditService.log({tournamentId:d.tournamentId,divisionId,entityType:'division',entityId:divisionId,action:'create',eventCode:'RR_FULL_SCHEDULE_COMMITTED',after:{rounds:scheduled.length,opponentPairs:meetings.size,playerCount:regs.length}});
+            return {data:{rounds:scheduled.length,pairs:meetings.size}};
+        } catch(e) {
+            Storage._data=backup;
+            Storage._save();
+            return {errors:[`Full schedule rolled back: ${e.message||e}`]};
+        }
+    }
+};
+
 // ============================================================
 // PATCH 02.19 — TABLE ASSIGNMENT CENTRALIZATION
 // ============================================================
@@ -10845,8 +10925,24 @@ const App = {
     startDivisionWorkflow(divisionId, nextPage='registration') {
         const d = DivisionService.getById(divisionId);
         if (!d) return this.showToast(this.ui('Division not found','ไม่พบดิวิชัน'),'error');
+        const rrFull=RoundRobinFullScheduleService.isPreset(divisionId) && !RoundService.getByDivision(divisionId).length;
+        // Preflight before changing lifecycle state; no partial RR schedule may be started.
+        if(rrFull) {
+            const eligible=RegistrationService.getEligible(divisionId);
+            const capacity=RoundRobinCapacityService.capacityForPlayerCount(eligible.length);
+            if(!capacity.valid || Number(d.totalRounds)!==capacity.cycleLength)
+                return this.showToast(capacity.valid?`Round Robin: ${eligible.length} players require exactly ${capacity.cycleLength} rounds. Division has ${d.totalRounds}.`:(capacity.error||'Invalid Round Robin pool'),'error');
+        }
+        const beforeStart=rrFull?JSON.parse(JSON.stringify(Storage.exportAll())):null;
         const r = DivisionCompetitionLifecycleService.start(divisionId);
         if (r.errors) return this.showToast(this.ui(r.errors[0], r.errors[0]), 'error');
+        if(rrFull) {
+            const schedule=RoundRobinFullScheduleService.create(divisionId);
+            if(schedule.errors) {
+                Storage._data=beforeStart; Storage._save();
+                return this.showToast(schedule.errors.join('; '),'error');
+            }
+        }
         this.currentDivisionId = divisionId;
         localStorage.setItem('krutar_current_division', divisionId);
         this.showToast(this.ui(`Division ${d.divisionCode} started — Round 1 can now be created.`,`เริ่ม Division ${d.divisionCode} แล้ว — พร้อมสร้างรอบที่ 1`),'success');
@@ -12189,7 +12285,7 @@ const App = {
                 : !divisionActive
                     ? this.ui(`Start Division ${targetDiv.divisionCode} before creating a round.`,`ต้องเริ่ม Division ${targetDiv.divisionCode} ก่อนจึงจะสร้างรอบการแข่งขันได้`)
                     : (roundCreateGuard.ok ? '' : roundCreateGuard.errors[0]);
-        const canCreateRound = divisionActive && roundCreateGuard.ok;
+        const canCreateRound = divisionActive && roundCreateGuard.ok && !RoundRobinFullScheduleService.isPreset(targetDiv.divisionId);
         const finishedRounds = rounds.filter(r => r.status === 'locked').length;
         const finishedPairings = rounds.reduce((sum, r) => sum + PairingService.getByRound(r.roundId).filter(p => p.status !== 'cancelled').length, 0);
         const finishedResults = rounds.reduce((sum, r) => sum + ResultService.getByRound(r.roundId).filter(m => m.status !== 'voided' && m.resultType !== 'void').length, 0);
@@ -12220,6 +12316,9 @@ const App = {
                 <button onclick="App.runRoundLifecycleSelfTest()" class="mt-3 px-3 py-2 border border-cyan-600 text-cyan-500 rounded-lg text-sm">Run Round Lifecycle Self-Test</button>
                 <div id="round-lifecycle-self-test-result" class="hidden"></div>
             </div>`;
+        if (RoundRobinFullScheduleService.isPreset(targetDiv.divisionId) && rounds.length) {
+            html += `<div class="card rounded-lg p-4 bg-white dark:bg-gray-800"><div class="flex justify-between items-center gap-2 flex-wrap"><strong>Round Robin — Full Schedule (${rounds.length} rounds)</strong><button onclick="App.printRoundRobinSchedule('${targetDiv.divisionId}')" class="px-3 py-2 border rounded-lg text-sm">${this.ui('Print Full Schedule','พิมพ์ตารางครบทุกเกม')}</button></div><div class="text-sm mt-2 space-y-2">${rounds.map(r=>`<div class="border-b dark:border-gray-700 pb-2"><b>${Utils.escHtml(r.roundLabel)}</b> — ${PairingService.getByRound(r.roundId).map(p=>`T${p.tableNumber}: ${Utils.escHtml(this.pairingParticipantInfo(p.player1RegistrationId,p.player1Id,targetDiv.divisionId).label)} ${p.pairingType==='bye'?'— BYE':'vs '+Utils.escHtml(this.pairingParticipantInfo(p.player2RegistrationId,p.player2Id,targetDiv.divisionId).label)}`).join(' · ')}</div>`).join('')}</div></div>`;
+        }
         rounds.forEach(r => {
             const pairings = PairingService.getByRound(r.roundId);
             const results = ResultService.getByRound(r.roundId);
@@ -12243,7 +12342,7 @@ const App = {
                     </div>
                     <div class="flex gap-1 flex-wrap">
                         <button onclick="App.openRoundPairings('${r.roundId}','${targetDiv.divisionId}')" class="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded">${this.ui('Pairings','คู่แข่งขัน')}</button>
-                        ${r.status==='pairing_confirmed' && results.length===0?`<button onclick="App.reopenPairings('${r.roundId}')" class="text-xs px-2 py-1 bg-amber-100 text-amber-800 rounded">${this.ui('Reopen Pairings','เปิดแก้ไขคู่แข่งขัน')}</button>`:''}
+                        ${!RoundRobinFullScheduleService.isPreset(targetDiv.divisionId) && r.status==='pairing_confirmed' && results.length===0?`<button onclick="App.reopenPairings('${r.roundId}')" class="text-xs px-2 py-1 bg-amber-100 text-amber-800 rounded">${this.ui('Reopen Pairings','เปิดแก้ไขคู่แข่งขัน')}</button>`:''}
                         ${r.status==='pairing_confirmed'?`<button onclick="App.startRound('${r.roundId}')" class="text-xs px-2 py-1 bg-green-100 text-green-700 rounded">Start</button>`:''}
                         ${r.status==='draft'?`<button onclick="App.deleteRound('${r.roundId}')" class="text-xs px-2 py-1 bg-red-100 text-red-700 rounded">${this.ui('Delete Round','ลบรอบ')}</button>`:''}
                         ${r.status==='in_progress'||r.status==='results_pending'||r.status==='completed'?`<button onclick="App.currentDivisionId='${targetDiv.divisionId}';App.navigate('results')" class="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded">${this.ui('Results','ผลการแข่งขัน')}</button>`:''}
@@ -12301,6 +12400,15 @@ const App = {
         el.innerHTML = html;
     },
 
+    printRoundRobinSchedule(divisionId) {
+        if(!RoundRobinFullScheduleService.isPreset(divisionId)) return;
+        const d=DivisionService.getById(divisionId);
+        const rows=RoundService.getByDivision(divisionId).map(r=>`<h3>${Utils.escHtml(r.roundLabel)}</h3><table><thead><tr><th>Table</th><th>Player 1 (display)</th><th>Player 2 (display)</th></tr></thead><tbody>${PairingService.getByRound(r.roundId).map(p=>`<tr><td>${p.tableNumber}</td><td>${Utils.escHtml(this.pairingParticipantInfo(p.player1RegistrationId,p.player1Id,divisionId).label)}</td><td>${p.pairingType==='bye'?'BYE':Utils.escHtml(this.pairingParticipantInfo(p.player2RegistrationId,p.player2Id,divisionId).label)}</td></tr>`).join('')}</tbody></table>`).join('');
+        const w=window.open('','_blank');
+        if(!w) return this.showToast('Allow pop-ups to print full schedule.','warning');
+        w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>RR Full Schedule</title><style>body{font:14px sans-serif;margin:24px;color:#111}h3{margin-top:24px}table{width:100%;border-collapse:collapse}td,th{border:1px solid #777;padding:6px;text-align:left}@media print{h3{break-after:avoid}table{break-inside:avoid}}</style></head><body><h2>${Utils.escHtml(d.divisionCode)} — Round Robin Full Schedule</h2><p>Left/right placement does not determine who starts.</p>${rows}</body></html>`);
+        w.document.close(); w.focus(); w.print();
+    },
     openRoundPairings(roundId, divisionId) {
         this.currentDivisionId = divisionId;
         this.currentRoundId = roundId;
@@ -12626,7 +12734,8 @@ const App = {
         const rrPlanReport = RoundRobinCapacityService.analyzePlan(targetDiv.divisionId, eligible.length);
         const rrSequence = RoundRobinCapacityService.validateRound(PairingContextBuilder.build(targetDiv.divisionId, selectedRound.roundId), 'round_robin');
         const roundResults = ResultService.getByRound(selectedRound.roundId);
-        const editable = selectedRound.status==='draft'||selectedRound.status==='pairing_generated';
+        const rrReadOnly = RoundRobinFullScheduleService.isPreset(targetDiv.divisionId) && !!targetDiv.rrFullScheduleCommittedAt;
+        const editable = !rrReadOnly && (selectedRound.status==='draft'||selectedRound.status==='pairing_generated');
         const lateArrivalState = LateArrivalDoubleWalkoverService.inspect(selectedRound.roundId, targetDiv.divisionId);
         const lateArrivalEditable = lateArrivalState.ok && lateArrivalState.available.length >= 2;
 
@@ -12647,8 +12756,8 @@ const App = {
                     <button onclick="App.validatePairings('${selectedRound.roundId}')" class="px-3 py-2 border border-blue-500 text-blue-600 rounded-lg text-sm">${this.ui('Validate Pairings','ตรวจสอบคู่แข่งขัน')}</button>
                     <button onclick="App.confirmPairings('${selectedRound.roundId}')" class="px-3 py-2 bg-green-600 text-white rounded-lg text-sm">${this.ui('Confirm All','ยืนยันทั้งหมด')}</button>
                     ${pairings.length?`<button onclick="App.clearRoundPairings('${selectedRound.roundId}')" class="px-3 py-2 border border-red-400 text-red-600 rounded-lg text-sm">${this.ui('Clear Draft Pairings','ล้างคู่ฉบับร่าง')}</button>`:''}`:''}
-                    ${lateArrivalEditable?`<button onclick="App.showLateArrivalPairForm('${selectedRound.roundId}','${targetDiv.divisionId}')" class="px-3 py-2 border border-orange-500 text-orange-600 dark:text-orange-300 rounded-lg text-sm font-medium">${this.ui('+ Late Pair · Double WO only','+ เพิ่มคู่มาสาย · Double WO เท่านั้น')}</button>`:''}
-                    ${selectedRound.status==='pairing_confirmed' && roundResults.length===0?`<button onclick="App.reopenPairings('${selectedRound.roundId}')" class="px-3 py-2 bg-amber-500 text-white rounded-lg text-sm">${this.ui('Reopen Pairings','เปิดแก้ไขคู่แข่งขัน')}</button>`:''}
+                    ${lateArrivalEditable && !rrReadOnly?`<button onclick="App.showLateArrivalPairForm('${selectedRound.roundId}','${targetDiv.divisionId}')" class="px-3 py-2 border border-orange-500 text-orange-600 dark:text-orange-300 rounded-lg text-sm font-medium">${this.ui('+ Late Pair · Double WO only','+ เพิ่มคู่มาสาย · Double WO เท่านั้น')}</button>`:''}
+                    ${!rrReadOnly && selectedRound.status==='pairing_confirmed' && roundResults.length===0?`<button onclick="App.reopenPairings('${selectedRound.roundId}')" class="px-3 py-2 bg-amber-500 text-white rounded-lg text-sm">${this.ui('Reopen Pairings','เปิดแก้ไขคู่แข่งขัน')}</button>`:''}
                     <button onclick="BackupService.exportPairingsCsv('${selectedRound.roundId}')" class="px-3 py-2 border rounded-lg text-sm">${this.ui('Export CSV','ส่งออก CSV')}</button>
                     <button onclick="window.print()" class="px-3 py-2 border rounded-lg text-sm">${this.ui('Print','พิมพ์')}</button>
                 </div>
@@ -12790,6 +12899,7 @@ const App = {
     },
 
     showAddPairingForm(roundId, divisionId) {
+        if(RoundRobinFullScheduleService.isPreset(divisionId) && DivisionService.getById(divisionId)?.rrFullScheduleCommittedAt) return this.showToast('Round Robin full schedule is read-only.','warning');
         const eligible = RegistrationService.getEligible(divisionId);
         const existingPairings = PairingService.getByRound(roundId);
         const pairedIds = new Set(existingPairings.flatMap(p=>[p.player1Id,p.player2Id].filter(Boolean)));
@@ -12862,6 +12972,7 @@ const App = {
     },
 
     showPairingPlanBuilder(roundId, divisionId) {
+        if(RoundRobinFullScheduleService.isPreset(divisionId) && DivisionService.getById(divisionId)?.rrFullScheduleCommittedAt) return this.showToast('Round Robin full schedule is read-only.','warning');
         const round = RoundService.getById(roundId);
         const division = DivisionService.getById(divisionId);
         const plan = PairingPlanResolver.resolve(divisionId, round.roundNumber);
