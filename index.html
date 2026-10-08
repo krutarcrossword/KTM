@@ -7105,7 +7105,9 @@ const AutomaticGibsonClinchDetectionService = {
         const proof=ClinchMathematicsService.analyzeDivision(divisionId,{throughRound});
         if(!proof.ok) return {ok:false,errors:proof.errors||['Clinch mathematics failed.'],candidates:[],proof};
         if(!proof.canProve) return {ok:true,errors:[],warnings:['Clinch status is UNDETERMINED. The active ranking rules cannot be safely bounded; no Gibson candidate will be proposed.'],candidates:[],proof,status:'UNDETERMINED'};
-        const cutoff=this.qualificationCutoffRank;
+        const division=DivisionService.getById(divisionId);
+        const hasFinal=(division?.finalStageFormat || 'none') !== 'none';
+        const cutoff=hasFinal ? this.qualificationCutoffRank : 1;
         const eligible=RegistrationService.getEligible(divisionId);
         const byPlayer=new Map(eligible.map(r=>[r.playerId,r]));
         // Patch 02.35.1: Gibson proof is qualification proof, not championship proof.
@@ -7117,9 +7119,9 @@ const AutomaticGibsonClinchDetectionService = {
             currentRank:p.currentRank, securedRank:p.securedRank, qualificationCutoffRank:cutoff,
             currentMatchPoints:p.matchPoints, minMatchPoints:p.minMatchPoints, minOfficialSpread:p.minOfficialSpread,
             throughRound, remainingRounds:[...(proof.remainingRounds||[])],
-            proofReason:`Worst bounded final rank #${p.securedRank} remains inside Top ${cutoff}.`, proofVersion:2
+            proofReason:`Worst bounded final rank #${p.securedRank} remains inside Top ${cutoff} (${hasFinal?'Final qualification':'Division champion'}).`, proofVersion:3
         }));
-        return {ok:true,errors:[],warnings:proof.warnings||[],candidates,proof,qualificationCutoffRank:cutoff,status:candidates.length?'PROVEN_CANDIDATE':'NO_CLINCH'};
+        return {ok:true,errors:[],warnings:proof.warnings||[],candidates,proof,qualificationCutoffRank:cutoff,hasFinal,status:candidates.length?'PROVEN_CANDIDATE':'NO_CLINCH'};
     },
     runSelfTest(){
         const errors=[];
@@ -9425,7 +9427,7 @@ const GibsonDecisionProvenanceService = {
             if(!['koth_gibson_manual','koth_gibson_auto_confirmed'].includes(source)) errors.push(`Gibson BYE Table ${p.tableNumber}: unknown assignment source ${source||'—'}.`);
             if(source==='koth_gibson_auto_confirmed'){
                 if(!proof) errors.push(`Gibson BYE Table ${p.tableNumber}: auto-confirmed decision is missing clinch proof.`);
-                else if(!(proof.guaranteedTop2 || Number(proof.securedRank)<=Number(proof.qualificationCutoffRank||2))) errors.push(`Gibson BYE Table ${p.tableNumber}: stored clinch proof does not establish Top-2 safety.`);
+                else if(!(proof.guaranteedTop2 || Number(proof.securedRank)<=Number(proof.qualificationCutoffRank||2))) errors.push(`Gibson BYE Table ${p.tableNumber}: stored clinch proof does not establish the configured qualification/championship cutoff.`);
             }
             if(source==='koth_gibson_manual' && proof) warnings.push(`Gibson BYE Table ${p.tableNumber}: manual assignment also carries a clinch proof; allowed but not required.`);
         });
@@ -13041,7 +13043,7 @@ const App = {
             <div id="plan-gibson-wrap" class="hidden p-3 rounded-lg border border-purple-500/40 bg-purple-500/10">
                 <label class="text-sm font-medium block mb-1" for="plan-gibson">${this.ui('Gibsonize / Award Gibson BYE (KOTH only)','กำหนด Gibson BYE (เฉพาะ KOTH)')}</label>
                 <select id="plan-gibson" multiple size="4" class="w-full px-3 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600" onchange="App.syncPairingPlanByeUI('${roundId}','${divisionId}')"></select>
-                <div class="flex flex-wrap gap-2 mt-2"><button type="button" onclick="App.detectAutomaticGibsonClinch('${roundId}','${divisionId}')" class="px-3 py-1.5 border border-cyan-500 text-cyan-600 rounded-lg text-xs">${this.ui('Detect Mathematically Clinched','ตรวจผู้เล่นที่การันตีอันดับแล้ว')}</button><span id="plan-gibson-auto-status" class="text-xs text-gray-500 self-center">${this.ui('Detection is read-only. Guaranteed Top-2 players are candidates only; manager may keep them playing.','ระบบเพียงตรวจหาและเสนอผู้เล่นที่การันตี Top 2 แล้ว ผู้จัดยังสามารถให้ผู้เล่นคนนั้นแข่งขันต่อได้')}</span></div>
+                <div class="flex flex-wrap gap-2 mt-2"><button type="button" onclick="App.detectAutomaticGibsonClinch('${roundId}','${divisionId}')" class="px-3 py-1.5 border border-cyan-500 text-cyan-600 rounded-lg text-xs">${this.ui('Detect Mathematically Clinched','ตรวจผู้เล่นที่การันตีอันดับแล้ว')}</button><span id="plan-gibson-auto-status" class="text-xs text-gray-500 self-center">${this.ui('Detection is read-only. Clinched champion / Final qualifiers are candidates only; manager may keep them playing.','ระบบตรวจผู้เล่นที่การันตีแชมป์ (ไม่มี Final) หรือการันตี Top 2 (มี Final) ผู้จัดยังให้แข่งขันต่อได้')}</span></div>
                 <p class="text-xs text-purple-300 mt-1">${this.ui('Manual selection remains available. Gibsonization is optional and never automatic.','ยังสามารถเลือกเองได้ การให้ Gibson BYE เป็นทางเลือกและระบบจะไม่ดำเนินการอัตโนมัติโดยไม่ให้ผู้จัดยืนยัน')}</p></div>
             <div id="plan-bye-wrap" class="hidden"><label class="text-sm font-medium block mb-1" for="plan-bye">${this.ui('Ordinary BYE *','ผู้เล่นที่ได้รับ BYE *')}</label>
                 <div class="flex gap-2"><select id="plan-bye" class="flex-1 px-3 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"><option value="">— ${this.ui('Select player who receives BYE','เลือกผู้เล่นที่ได้รับ BYE')} —</option></select><button type="button" onclick="App.randomizePairingPlanBye('${roundId}','${divisionId}')" class="px-3 py-2 border border-amber-500 text-amber-600 rounded-lg text-sm whitespace-nowrap">🎲 ${this.ui('Random BYE','สุ่ม BYE')}</button></div>
@@ -13144,7 +13146,7 @@ const App = {
         if(!detection.ok){ if(status) status.textContent=(detection.errors||[]).join(' '); this.showToast((detection.errors||['Detection failed.']).join(' '),'error'); return; }
         if(!detection.candidates.length){ this.currentAutomaticGibsonAcceptance=null; if(status) status.textContent=detection.status==='UNDETERMINED'?'UNDETERMINED — no automatic Gibson proposal.':'No player is mathematically proven clinched for this round.'; this.showToast(status?.textContent||'No proven Gibson candidate.','info'); return; }
         const labels=detection.candidates.map((c,i)=>`${i+1}. ${TournamentPlayerDisplayService.resolveByPlayerId(divisionId,c.playerId).displayLabel} | current #${c.currentRank} | worst bounded rank #${c.securedRank} | guaranteed Top ${c.qualificationCutoffRank}`).join('\n');
-        const ok=confirm(`Gibson Qualification Preview — Patch 02.35.1\n\nThe following player(s) are mathematically guaranteed to remain inside the Final Top ${detection.qualificationCutoffRank}, even under conservative remaining-round bounds:\n\n${labels}\n\nThis is ONLY a preview. Manager may Gibsonize none, one, or several candidates.\n\nPress OK to mark these proven candidates in the selector for review. You may freely unselect any player to KEEP PLAYING before Preview + Confirm.`);
+        const ok=confirm(`Gibson Qualification Preview — Patch 02.35.1\n\nThe following player(s) are mathematically guaranteed to remain inside the ${detection.hasFinal ? "Final qualification Top" : "Division championship Top"} ${detection.qualificationCutoffRank}, even under conservative remaining-round bounds:\n\n${labels}\n\nThis is ONLY a preview. Manager may Gibsonize none, one, or several candidates.\n\nPress OK to mark these proven candidates in the selector for review. You may freely unselect any player to KEEP PLAYING before Preview + Confirm.`);
         if(!ok){ if(status) status.textContent='Qualified candidate(s) detected. Manager chose Keep Playing / no selection change.'; return; }
         const select=document.getElementById('plan-gibson');
         const ids=detection.candidates.map(c=>c.registrationId);
@@ -13152,11 +13154,11 @@ const App = {
         const proofByRegistrationId={}; detection.candidates.forEach(c=>proofByRegistrationId[c.registrationId]=c);
         this.currentAutomaticGibsonAcceptance={roundId,divisionId,registrationIds:ids,proofByRegistrationId,acceptedAt:Utils.now()};
         const reason=document.getElementById('plan-reason');
-        if(reason && !reason.value.trim()) reason.value=`Top-2 qualification proof reviewed by manager before Round ${RoundService.getById(roundId)?.roundNumber} (Patch 02.35.1)`;
+        if(reason && !reason.value.trim()) reason.value=`Top-${detection.qualificationCutoffRank} clinch proof reviewed by manager before Round ${RoundService.getById(roundId)?.roundNumber} (Patch 02.35.1)`;
         this.currentPairingProposal=null;
         this.syncPairingPlanByeUI(roundId,divisionId);
-        if(status) status.textContent=`Detected ${ids.length} guaranteed Top-2 candidate(s). Manager may keep playing by unselecting any/all before Preview.`;
-        this.showToast('Top-2 Gibson candidates marked for manager review. Unselect any player who should keep playing, then Preview.','success');
+        if(status) status.textContent=`Detected ${ids.length} guaranteed Top-${detection.qualificationCutoffRank} candidate(s). Manager may keep playing by unselecting any/all before Preview.`;
+        this.showToast('Gibson candidates marked for manager review. Unselect any player who should keep playing, then Preview.','success');
     },
 
     runAutomaticGibsonDetectionSelfTest() {
