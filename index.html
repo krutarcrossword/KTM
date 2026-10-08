@@ -24,7 +24,7 @@
   <style>
         * { box-sizing: border-box; }
 
-        /* RC5.10.29.16 — readable automatic BYE panels in Light Mode only */
+        /* RC5.10.29.17 — readable automatic BYE panels in Light Mode only */
         html:not(.dark) #plan-swiss-bye-info,
         html:not(.dark) #plan-rga-bye-info { color: #164e63 !important; background-color: #ecfeff !important; border-color: #67e8f9 !important; }
         html:not(.dark) #plan-swiss-bye-info strong,
@@ -14853,6 +14853,15 @@ const App = {
         el.innerHTML = html;
     },
 
+    // Show (gib) only for a Gibson BYE in the most recently confirmed pairing round.
+    // Older Gibson BYEs must not label unrelated players in the current Standing.
+    hasCurrentRoundGibsonBye(divisionId, playerId) {
+        const confirmed = Storage.find('pairings', p => p.divisionId === divisionId && p.status !== 'cancelled' && p.status !== 'voided');
+        if (!confirmed.length) return false;
+        const latestRound = Math.max(...confirmed.map(p => Number(p.roundNumber) || 0));
+        return confirmed.some(p => Number(p.roundNumber) === latestRound && p.player1Id === playerId && p.pairingType === 'bye' && (p.byeReason || p.engineMetadata?.byeReason) === 'gibson');
+    },
+
     buildStandingTable(rows, prevSnapshot) {
         let html = `<div class="table-container card rounded-lg bg-white dark:bg-gray-800">
             <table class="w-full text-sm"><thead><tr class="border-b dark:border-gray-700 text-left">
@@ -14876,7 +14885,7 @@ const App = {
             const delta = prevRank ? prevRank - r.rank : 0;
             const deltaStr = delta > 0 ? `<span class="rank-up">▲${delta}</span>` : delta < 0 ? `<span class="rank-down">▼${Math.abs(delta)}</span>` : '—';
             // Display Gibson marker only after the confirmed pairing is persisted.
-            const hasConfirmedGibson = Storage.find('pairings', p => p.divisionId === (this.currentDivisionId || '') && p.player1Id === r.playerId && p.pairingType === 'bye' && (p.byeReason || p.engineMetadata?.byeReason) === 'gibson').length > 0;
+            const hasConfirmedGibson = this.hasCurrentRoundGibsonBye(this.currentDivisionId || '', r.playerId);
             const gibsonNameSuffix = hasConfirmedGibson ? '<span class="ml-1 text-purple-600 dark:text-purple-300 font-semibold">(gib)</span>' : '';
             html += `<tr class="border-b dark:border-gray-700">
                 <td class="p-2 font-bold">${r.rank}</td>
@@ -15087,7 +15096,7 @@ const App = {
         html += `</div>
             <div class="krutar-public-standing card rounded-xl bg-white dark:bg-gray-800 overflow-hidden">
                 <div class="px-4 py-3 border-b dark:border-gray-700 flex justify-between"><div class="font-bold">Standing through Round ${round.roundNumber}</div><div class="text-xs text-gray-500">${board.counts.pending?'PROVISIONAL · partial results':'Current cumulative result'}</div></div>
-                <div class="overflow-hidden"><table class="w-full text-sm"><thead><tr class="border-b dark:border-gray-700 text-left"><th class="p-2">#</th><th class="p-2">Player</th><th class="p-2 text-center">GP</th><th class="p-2"><span class="krutar-wtl-os"><span>W-T-L</span><span>OS</span></span></th><th class="p-2 krutar-manager-detail">MP</th><th class="p-2 krutar-manager-detail">SF</th><th class="p-2 krutar-manager-detail">SA</th></tr></thead><tbody>${board.standing.map(r=>`<tr class="border-b dark:border-gray-700"><td class="p-2 font-bold">${r.rank}</td><td class="p-2">${(()=>{const live=LiveIdentityResolver.standingRow(r,targetDiv.divisionId);return `<button onclick="App.showPlayerResultHistory('${live.playerId}')" class="font-medium text-blue-600 dark:text-blue-300 hover:underline">${Utils.escHtml(TournamentPlayerCodeService.resolveCode(live.registrationId) || '')} — ${Utils.escHtml(live.playerName)}</button>${Storage.find('pairings',p=>p.divisionId===targetDiv.divisionId && p.player1Id===live.playerId && p.pairingType==='bye' && (p.byeReason||p.engineMetadata?.byeReason)==='gibson').length?'<span class="ml-1 text-purple-600">(gib)</span>':''}`;})()}</td><td class="p-2 text-center font-bold">${r.gamesPlayed}</td><td class="p-2 font-bold whitespace-nowrap"><span class="krutar-wtl-os"><span>${r.wins}-${r.ties}-${r.losses}</span><span class="${r.sumOfficialSpread>=0?'text-green-600':'text-red-600'}">${sign(r.sumOfficialSpread)}</span></span></td><td class="p-2 font-bold krutar-manager-detail">${r.matchPoints}</td><td class="p-2 krutar-manager-detail">${r.scoreFor}</td><td class="p-2 krutar-manager-detail">${r.scoreAgainst}</td></tr>`).join('')}</tbody></table></div>
+                <div class="overflow-hidden"><table class="w-full text-sm"><thead><tr class="border-b dark:border-gray-700 text-left"><th class="p-2">#</th><th class="p-2">Player</th><th class="p-2 text-center">GP</th><th class="p-2"><span class="krutar-wtl-os"><span>W-T-L</span><span>OS</span></span></th><th class="p-2 krutar-manager-detail">MP</th><th class="p-2 krutar-manager-detail">SF</th><th class="p-2 krutar-manager-detail">SA</th></tr></thead><tbody>${board.standing.map(r=>`<tr class="border-b dark:border-gray-700"><td class="p-2 font-bold">${r.rank}</td><td class="p-2">${(()=>{const live=LiveIdentityResolver.standingRow(r,targetDiv.divisionId);return `<button onclick="App.showPlayerResultHistory('${live.playerId}')" class="font-medium text-blue-600 dark:text-blue-300 hover:underline">${Utils.escHtml(TournamentPlayerCodeService.resolveCode(live.registrationId) || '')} — ${Utils.escHtml(live.playerName)}</button>${this.hasCurrentRoundGibsonBye(targetDiv.divisionId, live.playerId)?'<span class="ml-1 text-purple-600">(gib)</span>':''}`;})()}</td><td class="p-2 text-center font-bold">${r.gamesPlayed}</td><td class="p-2 font-bold whitespace-nowrap"><span class="krutar-wtl-os"><span>${r.wins}-${r.ties}-${r.losses}</span><span class="${r.sumOfficialSpread>=0?'text-green-600':'text-red-600'}">${sign(r.sumOfficialSpread)}</span></span></td><td class="p-2 font-bold krutar-manager-detail">${r.matchPoints}</td><td class="p-2 krutar-manager-detail">${r.scoreFor}</td><td class="p-2 krutar-manager-detail">${r.scoreAgainst}</td></tr>`).join('')}</tbody></table></div>
             </div>
         </div>`;
         el.innerHTML=html;
