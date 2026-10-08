@@ -12179,14 +12179,29 @@ const App = {
         const tournament = TournamentService.getById(this.currentTournamentId);
         const divisionStartReadiness = DivisionCompetitionLifecycleService.readiness(targetDiv.divisionId);
         const divisionActive = targetDiv.status === 'active';
+        const divisionCompleted = targetDiv.status === 'completed' || !!targetDiv.finalizedAt;
+        const divisionClosed = ['approved','archived','cancelled'].includes(targetDiv.status);
         const roundCreateGuard = RoundCreationGuardService.inspectState(targetDiv.totalRounds, rounds);
-        const roundCreateReason = !divisionActive
-            ? this.ui(`Start Division ${targetDiv.divisionCode} before creating a round.`,`ต้องเริ่ม Division ${targetDiv.divisionCode} ก่อนจึงจะสร้างรอบการแข่งขันได้`)
-            : (roundCreateGuard.ok ? '' : roundCreateGuard.errors[0]);
+        const roundCreateReason = divisionCompleted
+            ? this.ui('Division completed — no additional rounds can be created.','การแข่งขันดิวิชันนี้เสร็จสิ้นแล้ว ไม่สามารถสร้างรอบเพิ่มได้')
+            : divisionClosed
+                ? this.ui(`Division status ${String(targetDiv.status).toUpperCase()} does not allow new rounds.`,`สถานะดิวิชัน ${String(targetDiv.status).toUpperCase()} ไม่อนุญาตให้สร้างรอบใหม่`)
+                : !divisionActive
+                    ? this.ui(`Start Division ${targetDiv.divisionCode} before creating a round.`,`ต้องเริ่ม Division ${targetDiv.divisionCode} ก่อนจึงจะสร้างรอบการแข่งขันได้`)
+                    : (roundCreateGuard.ok ? '' : roundCreateGuard.errors[0]);
         const canCreateRound = divisionActive && roundCreateGuard.ok;
+        const finishedRounds = rounds.filter(r => r.status === 'locked').length;
+        const finishedPairings = rounds.reduce((sum, r) => sum + PairingService.getByRound(r.roundId).filter(p => p.status !== 'cancelled').length, 0);
+        const finishedResults = rounds.reduce((sum, r) => sum + ResultService.getByRound(r.roundId).filter(m => m.status !== 'voided' && m.resultType !== 'void').length, 0);
 
         let html = `<div class="space-y-4">
-            ${!divisionActive ? `<div class="card rounded-xl p-4 border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/20">
+            ${divisionCompleted ? `<div class="card rounded-xl p-4 border border-emerald-400 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/20">
+                <p class="font-semibold text-emerald-800 dark:text-emerald-200">✓ ${this.ui(`Division ${targetDiv.divisionCode} — Competition Completed`,`Division ${targetDiv.divisionCode} — การแข่งขันเสร็จสิ้นแล้ว`)}</p>
+                <p class="text-sm text-gray-600 dark:text-gray-300 mt-1">${this.ui(`Locked rounds: ${finishedRounds}/${rounds.length} · Recorded results: ${finishedResults}/${finishedPairings}. View pairings, results and final standings below.`,`ปิดรอบแล้ว ${finishedRounds}/${rounds.length} รอบ · บันทึกผล ${finishedResults}/${finishedPairings} รายการ สามารถดูคู่แข่งขัน ผลการแข่งขัน และอันดับสุดท้ายได้`)}</p>
+            </div>` : divisionClosed ? `<div class="card rounded-xl p-4 border border-gray-400 dark:border-gray-600 bg-gray-50 dark:bg-gray-900/30">
+                <p class="font-semibold">${this.ui(`Division ${targetDiv.divisionCode} — ${String(targetDiv.status).toUpperCase()}`,`Division ${targetDiv.divisionCode} — สถานะ ${String(targetDiv.status).toUpperCase()}`)}</p>
+                <p class="text-sm text-gray-500 mt-1">${this.ui('This Division is no longer accepting new rounds.','ดิวิชันนี้ไม่เปิดให้สร้างรอบการแข่งขันใหม่')}</p>
+            </div>` : !divisionActive ? `<div class="card rounded-xl p-4 border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/20">
                 <div class="flex justify-between items-center gap-3 flex-wrap">
                     <div><p class="font-semibold text-amber-800 dark:text-amber-200">${this.ui(`Division ${targetDiv.divisionCode} has not started yet`,`Division ${targetDiv.divisionCode} ยังไม่เริ่มการแข่งขัน`)}</p>
                     <p class="text-sm text-gray-600 dark:text-gray-300 mt-1">${this.ui('This page belongs to the selected Division. Start this Division after its players are checked in, then create Round 1.','หน้านี้ทำงานตามดิวิชันที่เลือก ต้องเช็กอินผู้เล่นของดิวิชันนี้ให้พร้อม แล้วเริ่มดิวิชันก่อนสร้างรอบที่ 1')}</p>
