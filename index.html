@@ -8192,7 +8192,8 @@ const RoundRobinCapacityService = {
         }
         const errors = [], warnings = [];
         if (!capacity.valid) errors.push(capacity.error);
-        if (capacity.valid && roundRobinRounds.length > capacity.cycleLength) {
+        const allowedCycles=plan?.engineSettings?.hybridRRMode==='double'?2:1;
+        if (capacity.valid && roundRobinRounds.length > capacity.cycleLength*allowedCycles) {
             errors.push(`Pairing plan invalid: ${roundRobinRounds.length} Round Robin round(s) are configured, but ${capacity.playerCount} eligible players allow only ${capacity.cycleLength} unique Round Robin round(s) per cycle. Change the excess Round Robin round(s) to another pairing method before using this plan.`);
         }
         return { valid:!errors.length, errors, warnings, plan, capacity, roundRobinRounds, plannedRoundRobinCount:roundRobinRounds.length, totalRounds };
@@ -8406,6 +8407,33 @@ const PairingContextBuilder = {
 };
 
 
+// KTM RC5.10.29.7 — Hybrid RR/DRR plan with deferred roster validation.
+const HybridRoundRobinService = {
+    isHybrid(d) { return !!d && ['single','double'].includes(d.hybridRRMode); },
+    inspect(d, count) {
+        const cap=RoundRobinCapacityService.capacityForPlayerCount(count);
+        if (!cap.valid) return {valid:false, errors:[cap.error], capacity:cap};
+        const rrRounds=cap.cycleLength*(d.hybridRRMode==='double'?2:1);
+        const total=Number(d.totalRounds);
+        return {valid:total>=rrRounds,errors:total>=rrRounds?[]:[`Hybrid ${d.hybridRRMode==='double'?'Double RR':'RR'}: ${count} players require at least ${rrRounds} rounds; Division has ${total} (short ${rrRounds-total}).`],capacity:cap,rrRounds,remaining:total-rrRounds};
+    },
+    prepare(divisionId) {
+        const d=DivisionService.getById(divisionId);
+        if (!this.isHybrid(d)) return {errors:['Not a Hybrid RR Division']};
+        const count=RegistrationService.getEligible(divisionId).length;
+        const info=this.inspect(d,count);
+        if (!info.valid) return {errors:info.errors};
+        const plans=Storage.find('pairingPlans',p=>p.divisionId===divisionId&&p.status==='active');
+        const plan=plans.find(p=>p.pairingPlanId===d.pairingPlanId)||plans[0];
+        if (!plan) return {errors:['Active pairing plan missing']};
+        const rules=Array.from({length:d.totalRounds},(_,i)=>({roundNumber:i+1,engine:i<info.rrRounds?'round_robin':'manual',settings:{}}));
+        Storage.update('pairingPlans','pairingPlanId',plan.pairingPlanId,{planType:'custom_sequence',planName:`Hybrid ${d.hybridRRMode==='double'?'Double RR':'RR'} + Manager`,totalRounds:d.totalRounds,roundRules:rules,engineSettings:{hybridRRMode:d.hybridRRMode,rrRounds:info.rrRounds},version:Number(plan.version||1)+1,updatedAt:Utils.now()});
+        Storage.update('divisions','divisionId',divisionId,{hybridRRRounds:info.rrRounds,hybridRosterCount:count});
+        return {data:info};
+    },
+    isProtectedRound(d,roundNumber) {return this.isHybrid(d)&&!!d.rrFullScheduleCommittedAt&&Number(roundNumber)<=Number(d.hybridRRRounds||0);}
+};
+
 // KTM RC5.10.29.5 — Round Robin full-schedule commitment.
 // Generate all rounds atomically when Division starts; later rounds are pre-confirmed,
 // but only the current round may be started after its predecessor is locked.
@@ -8414,7 +8442,7 @@ const RoundRobinFullScheduleService = {
         const d=DivisionService.getById(divisionId);
         if (!d) return false;
         const plan=Storage.getById('pairingPlans','pairingPlanId',d.pairingPlanId);
-        return PairingPlanPresetService.detect(plan,d.totalRounds)==='round_robin';
+        return HybridRoundRobinService.isHybrid(d) || PairingPlanPresetService.detect(plan,d.totalRounds)==='round_robin';
     },
     create(divisionId) {
         const d=DivisionService.getById(divisionId);
@@ -8424,28 +8452,34 @@ const RoundRobinFullScheduleService = {
         const regs=RegistrationService.getEligible(divisionId).slice().sort((a,b)=>(a.seed||9999)-(b.seed||9999)||String(a.playerId).localeCompare(String(b.playerId)));
         const capacity=RoundRobinCapacityService.capacityForPlayerCount(regs.length);
         if (!capacity.valid) return {errors:[capacity.error]};
-        if (Number(d.totalRounds)!==capacity.cycleLength)
+        const hybrid=HybridRoundRobinService.isHybrid(d);
+        const hybridInfo=hybrid?HybridRoundRobinService.inspect(d,regs.length):null;
+        if (hybrid && !hybridInfo.valid) return {errors:hybridInfo.errors};
+        if (!hybrid && Number(d.totalRounds)!==capacity.cycleLength)
             return {errors:[`Round Robin requires ${capacity.cycleLength} rounds for ${regs.length} players; Division has ${d.totalRounds}. Change Total Rounds before starting.`]};
         if (new Set(regs.map(r=>r.playerId)).size!==regs.length) return {errors:['Duplicate eligible player IDs.']};
         const padded=regs.slice(); if (padded.length%2) padded.push({playerId:'BYE',registrationId:'BYE'});
         const n=padded.length, fixed=padded[0], rotating=padded.slice(1);
         const scheduled=[], meetings=new Set(), byes=new Set();
-        for(let k=0;k<capacity.cycleLength;k++) {
-            const arranged=[fixed,...rotating.map((_,i)=>rotating[((i-k)%rotating.length+rotating.length)%rotating.length])];
+        const scheduleRounds=hybrid?hybridInfo.rrRounds:capacity.cycleLength;
+        for(let k=0;k<scheduleRounds;k++) {
+            const cycleRound=k%capacity.cycleLength;
+            const arranged=[fixed,...rotating.map((_,i)=>rotating[((i-cycleRound)%rotating.length+rotating.length)%rotating.length])];
             const pairs=[];
             for(let i=0;i<n/2;i++) {
                 const a=arranged[i], b=arranged[n-1-i];
                 if(a.playerId==='BYE'||b.playerId==='BYE') {
                     const real=a.playerId==='BYE'?b:a;
-                    if(byes.has(real.playerId)) return {errors:['Duplicate BYE detected.']};
-                    byes.add(real.playerId);
+                    if(byes.has(`${Math.floor(k/capacity.cycleLength)}|${real.playerId}`)) return {errors:['Duplicate BYE detected.']};
+                    byes.add(`${Math.floor(k/capacity.cycleLength)}|${real.playerId}`);
                     pairs.push({pairingType:'bye',player1RegistrationId:real.registrationId,player1Id:real.playerId});
                 } else {
                     const key=[a.playerId,b.playerId].sort().join('|');
-                    if(meetings.has(key)) return {errors:['Duplicate opponents detected.']};
-                    meetings.add(key);
+                    const cycleKey=`${Math.floor(k/capacity.cycleLength)}|${key}`;
+                    if(meetings.has(cycleKey)) return {errors:['Duplicate opponents detected.']};
+                    meetings.add(cycleKey);
                     // Display-side alternation is cosmetic, NOT a first-player/start assignment.
-                    const left=(k%2===1)?b:a, right=(k%2===1)?a:b;
+                    const left=(hybrid && k>=capacity.cycleLength)?((cycleRound%2===1)?a:b):((k%2===1)?b:a), right=(hybrid && k>=capacity.cycleLength)?((cycleRound%2===1)?b:a):((k%2===1)?a:b);
                     pairs.push({pairingType:'normal',player1RegistrationId:left.registrationId,player1Id:left.playerId,player2RegistrationId:right.registrationId,player2Id:right.playerId});
                 }
             }
@@ -8453,7 +8487,7 @@ const RoundRobinFullScheduleService = {
             if(seen.size!==regs.length) return {errors:[`Round ${k+1} does not cover the complete roster.`]};
             scheduled.push([...pairs.filter(p=>p.pairingType!=='bye'),...pairs.filter(p=>p.pairingType==='bye')]);
         }
-        if(meetings.size!==regs.length*(regs.length-1)/2 || (regs.length%2 && byes.size!==regs.length))
+        if(meetings.size!==regs.length*(regs.length-1)/2*(hybrid&&d.hybridRRMode==='double'?2:1) || (regs.length%2 && byes.size!==regs.length*(hybrid&&d.hybridRRMode==='double'?2:1)))
             return {errors:['Full-schedule uniqueness/completeness check failed.']};
         const backup=JSON.parse(JSON.stringify(Storage.exportAll()));
         try {
@@ -8475,7 +8509,7 @@ const RoundRobinFullScheduleService = {
                 const validation=PairingService.validateRound(round.roundId);
                 if(!validation.valid) throw new Error(`Round ${k+1}: ${validation.errors.join('; ')}`);
             });
-            Storage.update('divisions','divisionId',divisionId,{currentRound:1,rrFullScheduleCommittedAt:Utils.now(),rrFullScheduleRoster:regs.map(r=>r.registrationId)});
+            Storage.update('divisions','divisionId',divisionId,{currentRound:1,rrFullScheduleCommittedAt:Utils.now(),rrFullScheduleRoster:regs.map(r=>r.registrationId),...(hybrid?{hybridRRRounds:scheduleRounds}:{})});
             AuditService.log({tournamentId:d.tournamentId,divisionId,entityType:'division',entityId:divisionId,action:'create',eventCode:'RR_FULL_SCHEDULE_COMMITTED',after:{rounds:scheduled.length,opponentPairs:meetings.size,playerCount:regs.length}});
             return {data:{rounds:scheduled.length,pairs:meetings.size}};
         } catch(e) {
@@ -10926,16 +10960,22 @@ const App = {
         const d = DivisionService.getById(divisionId);
         if (!d) return this.showToast(this.ui('Division not found','ไม่พบดิวิชัน'),'error');
         const rrFull=RoundRobinFullScheduleService.isPreset(divisionId) && !RoundService.getByDivision(divisionId).length;
+        const hybrid=HybridRoundRobinService.isHybrid(d);
         // Preflight before changing lifecycle state; no partial RR schedule may be started.
         if(rrFull) {
             const eligible=RegistrationService.getEligible(divisionId);
             const capacity=RoundRobinCapacityService.capacityForPlayerCount(eligible.length);
-            if(!capacity.valid || Number(d.totalRounds)!==capacity.cycleLength)
-                return this.showToast(capacity.valid?`Round Robin: ${eligible.length} players require exactly ${capacity.cycleLength} rounds. Division has ${d.totalRounds}.`:(capacity.error||'Invalid Round Robin pool'),'error');
+            const hybridCheck=hybrid?HybridRoundRobinService.inspect(d,eligible.length):null;
+            if(!capacity.valid || (hybrid?!hybridCheck.valid:Number(d.totalRounds)!==capacity.cycleLength))
+                return this.showToast(hybrid?(hybridCheck.errors[0]):(capacity.valid?`Round Robin: ${eligible.length} players require exactly ${capacity.cycleLength} rounds. Division has ${d.totalRounds}.`:(capacity.error||'Invalid Round Robin pool')),'error');
         }
         const beforeStart=rrFull?JSON.parse(JSON.stringify(Storage.exportAll())):null;
+        if (rrFull && hybrid) {
+            const prepared=HybridRoundRobinService.prepare(divisionId);
+            if(prepared.errors) {Storage._data=beforeStart;Storage._save();return this.showToast(prepared.errors[0],'error');}
+        }
         const r = DivisionCompetitionLifecycleService.start(divisionId);
-        if (r.errors) return this.showToast(this.ui(r.errors[0], r.errors[0]), 'error');
+        if (r.errors) {if(beforeStart){Storage._data=beforeStart;Storage._save();} return this.showToast(this.ui(r.errors[0], r.errors[0]), 'error');}
         if(rrFull) {
             const schedule=RoundRobinFullScheduleService.create(divisionId);
             if(schedule.errors) {
@@ -11127,7 +11167,7 @@ const App = {
                     ${finalConfigLocked?`<span class="block mt-1 text-amber-500">${this.ui('Final configuration is locked after the Tournament starts.','รูปแบบ Final ถูกล็อกหลังเริ่มการแข่งขัน')}</span>`:''}
                 </p>
             </div>
-            <div class="border-t pt-3 dark:border-gray-700"><label class="text-sm font-medium block mb-1" for="df-pairing-preset">Pairing Plan Preset</label><select id="df-pairing-preset" class="w-full px-3 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"><option value="">${divisionId?'— Keep current pairing plan —':'Manual (default)'}</option><option value="prp">PRP — R1 Random · R2 RGA · R3 KOTH · R4 RGA · R5 KOTH · R6+ KOTH</option><option value="round_robin">Round Robin — พบกันหมด (Division Preset)</option></select><p class="text-xs text-gray-500 mt-1">${this.ui(
+            <div class="border-t pt-3 dark:border-gray-700"><label class="text-sm font-medium block mb-1" for="df-pairing-preset">Pairing Plan Preset</label><select id="df-pairing-preset" class="w-full px-3 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"><option value="">${divisionId?'— Keep current pairing plan —':'Manual (default)'}</option><option value="prp">PRP — R1 Random · R2 RGA · R3 KOTH · R4 RGA · R5 KOTH · R6+ KOTH</option><option value="round_robin">Round Robin — พบกันหมด (Division Preset)</option><option value="hybrid_single" ${d.hybridRRMode==='single'?'selected':''}>Hybrid Single RR + Manager chooses remaining rounds</option><option value="hybrid_double" ${d.hybridRRMode==='double'?'selected':''}>Hybrid Double RR + Manager chooses remaining rounds</option></select><p class="text-xs text-gray-500 mt-1">${this.ui(
     'Preset configuration is allowed only before this Division has pairing history. It never rewrites existing pairings or results.',
     'สามารถเลือกแผนจับคู่สำเร็จรูปได้เฉพาะก่อนที่ดิวิชันนี้จะมีประวัติการจับคู่ ระบบจะไม่เขียนทับการจับคู่หรือผลการแข่งขันที่มีอยู่แล้ว'
 )}</p></div>
@@ -11291,8 +11331,23 @@ const App = {
                 }
             }
         }
+        const pairingChoice=document.getElementById('df-pairing-preset')?.value||'';
+        if (pairingChoice.startsWith('hybrid_')) {
+            const count=divisionId?RegistrationService.getEligible(divisionId).length:0;
+            if (count>=2) {
+                const check=HybridRoundRobinService.inspect({...data,hybridRRMode:pairingChoice.slice(7)},count);
+                if (!check.valid) return this.showToast(check.errors[0],'error');
+            }
+            if (divisionId && (RoundService.getByDivision(divisionId).length || Storage.find('pairings',p=>p.divisionId===divisionId).length))
+                return this.showToast('Hybrid plan cannot be changed after rounds or pairings exist.','error');
+            data.hybridRRMode=pairingChoice.slice(7);
+            data.hybridRRRounds=null;
+        } else if (pairingChoice && divisionId && DivisionService.getById(divisionId)?.hybridRRMode) {
+            return this.showToast('Changing Hybrid plan requires a new Division; existing Hybrid settings were preserved.','error');
+        }
         const result = divisionId ? DivisionService.update(divisionId, data) : DivisionService.create(data);
         if (result.errors) { this.showToast(result.errors[0], 'error'); return; }
+        if (!divisionId && data.hybridRRMode) Storage.update('divisions','divisionId',result.data.divisionId,{hybridRRMode:data.hybridRRMode,hybridRRRounds:null});
         const savedDivision = result.data;
         const savedByePolicy = savedDivision?.byePolicyId ? Storage.getById('byePolicies','byePolicyId',savedDivision.byePolicyId) : null;
         if (savedByePolicy) {
@@ -11321,7 +11376,7 @@ const App = {
                 }
             }
         }
-        if (pairingPreset) {
+        if (pairingPreset && !pairingPreset.startsWith('hybrid_')) {
             const presetResult = PairingPlanPresetService.applyToDivision(savedDivision.divisionId, pairingPreset);
             if (presetResult.errors) { this.showToast(presetResult.errors[0], 'error'); return; }
         }
@@ -12285,7 +12340,7 @@ const App = {
                 : !divisionActive
                     ? this.ui(`Start Division ${targetDiv.divisionCode} before creating a round.`,`ต้องเริ่ม Division ${targetDiv.divisionCode} ก่อนจึงจะสร้างรอบการแข่งขันได้`)
                     : (roundCreateGuard.ok ? '' : roundCreateGuard.errors[0]);
-        const canCreateRound = divisionActive && roundCreateGuard.ok && !RoundRobinFullScheduleService.isPreset(targetDiv.divisionId);
+        const canCreateRound = divisionActive && roundCreateGuard.ok && (!RoundRobinFullScheduleService.isPreset(targetDiv.divisionId) || HybridRoundRobinService.isHybrid(targetDiv));
         const finishedRounds = rounds.filter(r => r.status === 'locked').length;
         const finishedPairings = rounds.reduce((sum, r) => sum + PairingService.getByRound(r.roundId).filter(p => p.status !== 'cancelled').length, 0);
         const finishedResults = rounds.reduce((sum, r) => sum + ResultService.getByRound(r.roundId).filter(m => m.status !== 'voided' && m.resultType !== 'void').length, 0);
@@ -12317,7 +12372,7 @@ const App = {
                 <div id="round-lifecycle-self-test-result" class="hidden"></div>
             </div>`;
         if (RoundRobinFullScheduleService.isPreset(targetDiv.divisionId) && rounds.length) {
-            html += `<div class="card rounded-lg p-4 bg-white dark:bg-gray-800"><div class="flex justify-between items-center gap-2 flex-wrap"><strong>Round Robin — Full Schedule (${rounds.length} rounds)</strong><button onclick="App.printRoundRobinSchedule('${targetDiv.divisionId}')" class="px-3 py-2 border rounded-lg text-sm">${this.ui('Print Full Schedule','พิมพ์ตารางครบทุกเกม')}</button></div><div class="text-sm mt-2 space-y-2">${rounds.map(r=>`<div class="border-b dark:border-gray-700 pb-2"><b>${Utils.escHtml(r.roundLabel)}</b> — ${PairingService.getByRound(r.roundId).map(p=>`T${p.tableNumber}: ${Utils.escHtml(this.pairingParticipantInfo(p.player1RegistrationId,p.player1Id,targetDiv.divisionId).label)} ${p.pairingType==='bye'?'— BYE':'vs '+Utils.escHtml(this.pairingParticipantInfo(p.player2RegistrationId,p.player2Id,targetDiv.divisionId).label)}`).join(' · ')}</div>`).join('')}</div></div>`;
+            html += `<div class="card rounded-lg p-4 bg-white dark:bg-gray-800"><div class="flex justify-between items-center gap-2 flex-wrap"><strong>Round Robin — Confirmed Schedule (${targetDiv.hybridRRRounds||rounds.length} rounds)</strong><button onclick="App.printRoundRobinSchedule('${targetDiv.divisionId}')" class="px-3 py-2 border rounded-lg text-sm">${this.ui('Print Full Schedule','พิมพ์ตารางครบทุกเกม')}</button></div><div class="text-sm mt-2 space-y-2">${rounds.map(r=>`<div class="border-b dark:border-gray-700 pb-2"><b>${Utils.escHtml(r.roundLabel)}</b> — ${PairingService.getByRound(r.roundId).map(p=>`T${p.tableNumber}: ${Utils.escHtml(this.pairingParticipantInfo(p.player1RegistrationId,p.player1Id,targetDiv.divisionId).label)} ${p.pairingType==='bye'?'— BYE':'vs '+Utils.escHtml(this.pairingParticipantInfo(p.player2RegistrationId,p.player2Id,targetDiv.divisionId).label)}`).join(' · ')}</div>`).join('')}</div></div>`;
         }
         rounds.forEach(r => {
             const pairings = PairingService.getByRound(r.roundId);
@@ -12734,7 +12789,7 @@ const App = {
         const rrPlanReport = RoundRobinCapacityService.analyzePlan(targetDiv.divisionId, eligible.length);
         const rrSequence = RoundRobinCapacityService.validateRound(PairingContextBuilder.build(targetDiv.divisionId, selectedRound.roundId), 'round_robin');
         const roundResults = ResultService.getByRound(selectedRound.roundId);
-        const rrReadOnly = RoundRobinFullScheduleService.isPreset(targetDiv.divisionId) && !!targetDiv.rrFullScheduleCommittedAt;
+        const rrReadOnly = RoundRobinFullScheduleService.isPreset(targetDiv.divisionId) && !!targetDiv.rrFullScheduleCommittedAt && (!HybridRoundRobinService.isHybrid(targetDiv) || Number(selectedRound.roundNumber)<=Number(targetDiv.hybridRRRounds||0));
         const editable = !rrReadOnly && (selectedRound.status==='draft'||selectedRound.status==='pairing_generated');
         const lateArrivalState = LateArrivalDoubleWalkoverService.inspect(selectedRound.roundId, targetDiv.divisionId);
         const lateArrivalEditable = lateArrivalState.ok && lateArrivalState.available.length >= 2;
@@ -12899,7 +12954,7 @@ const App = {
     },
 
     showAddPairingForm(roundId, divisionId) {
-        if(RoundRobinFullScheduleService.isPreset(divisionId) && DivisionService.getById(divisionId)?.rrFullScheduleCommittedAt) return this.showToast('Round Robin full schedule is read-only.','warning');
+        if(HybridRoundRobinService.isProtectedRound(DivisionService.getById(divisionId),RoundService.getById(roundId)?.roundNumber) || (!HybridRoundRobinService.isHybrid(DivisionService.getById(divisionId)) && RoundRobinFullScheduleService.isPreset(divisionId) && DivisionService.getById(divisionId)?.rrFullScheduleCommittedAt)) return this.showToast('Round Robin full schedule is read-only.','warning');
         const eligible = RegistrationService.getEligible(divisionId);
         const existingPairings = PairingService.getByRound(roundId);
         const pairedIds = new Set(existingPairings.flatMap(p=>[p.player1Id,p.player2Id].filter(Boolean)));
@@ -12972,7 +13027,7 @@ const App = {
     },
 
     showPairingPlanBuilder(roundId, divisionId) {
-        if(RoundRobinFullScheduleService.isPreset(divisionId) && DivisionService.getById(divisionId)?.rrFullScheduleCommittedAt) return this.showToast('Round Robin full schedule is read-only.','warning');
+        if(HybridRoundRobinService.isProtectedRound(DivisionService.getById(divisionId),RoundService.getById(roundId)?.roundNumber) || (!HybridRoundRobinService.isHybrid(DivisionService.getById(divisionId)) && RoundRobinFullScheduleService.isPreset(divisionId) && DivisionService.getById(divisionId)?.rrFullScheduleCommittedAt)) return this.showToast('Round Robin full schedule is read-only.','warning');
         const round = RoundService.getById(roundId);
         const division = DivisionService.getById(divisionId);
         const plan = PairingPlanResolver.resolve(divisionId, round.roundNumber);
@@ -15810,6 +15865,7 @@ window.AutomaticGibsonClinchDetectionService = AutomaticGibsonClinchDetectionSer
 window.SwissPairingService = SwissPairingService;
 window.SwissPairingEngine = SwissPairingEngine;
 window.PairingEngineTests = PairingEngineTests;
+window.HybridRoundRobinService = HybridRoundRobinService;
 window.RoundRobinCapacityService = RoundRobinCapacityService;
 window.PairingPlanPresetService = PairingPlanPresetService;
 window.PairingPlanResolver = PairingPlanResolver;
