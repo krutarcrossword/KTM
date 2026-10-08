@@ -8298,39 +8298,42 @@ const RoundRobinCapacityService = {
 // For safety, applying a preset is blocked once pairing history exists in the Division.
 // ============================================================
 const PairingPlanPresetService = {
-    identifiers() { return ['prp']; },
-    label(id) { return id === 'prp' ? 'PRP — Random / RGA / KOTH' : id; },
+    identifiers() { return ['prp','round_robin']; },
+    label(id) { return id === 'prp' ? 'PRP — Random / RGA / KOTH' : id === 'round_robin' ? 'Round Robin — Division preset' : id; },
     engineForRound(presetId, roundNumber) {
         const n = Number(roundNumber);
-        if (presetId !== 'prp' || !Number.isInteger(n) || n < 1) return null;
+        if (!Number.isInteger(n) || n < 1) return null;
+        if (presetId === 'round_robin') return 'round_robin';
+        if (presetId !== 'prp') return null;
         if (n === 1) return 'random';
         if (n === 2 || n === 4) return 'result_group_adjacent';
         return 'king_of_the_hill';
     },
     build(presetId, totalRounds) {
         const total = Number(totalRounds || 0);
-        if (presetId !== 'prp') return { errors:[`Unknown pairing preset: ${presetId}`] };
+        if (!this.identifiers().includes(presetId)) return { errors:[`Unknown pairing preset: ${presetId}`] };
         if (!Number.isInteger(total) || total < 1) return { errors:['Total rounds must be at least 1 before applying PRP.'] };
         const roundRules = Array.from({length:total}, (_,i) => {
             const roundNumber = i + 1;
             return { roundNumber, engine:this.engineForRound(presetId, roundNumber), settings:{} };
         });
         return {
-            presetId:'prp', planName:'PRP — Random / RGA / KOTH', planType:'custom_sequence',
-            totalRounds:total, roundRules, engineSettings:{ presetId:'prp', presetVersion:1 }
+            presetId, planName:presetId==='round_robin'?'Round Robin — Division preset':'PRP — Random / RGA / KOTH', planType:'custom_sequence',
+            totalRounds:total, roundRules, engineSettings:{ presetId, presetVersion:1 }
         };
     },
     detect(plan, divisionTotalRounds) {
         if (!plan) return null;
-        const built = this.build('prp', Number(plan.totalRounds || divisionTotalRounds || 0));
-        if (built.errors) return null;
-        const rules = plan.roundRules || [];
-        if (rules.length !== built.roundRules.length) return null;
-        const same = built.roundRules.every(expected => {
-            const actual = rules.find(r => Number(r.roundNumber || r.round) === expected.roundNumber);
-            return (actual?.engine || actual?.method) === expected.engine;
-        });
-        return same ? 'prp' : null;
+        const presetIds = this.identifiers();
+        const total = Number(plan.totalRounds || divisionTotalRounds || 0);
+        for (const id of presetIds) {
+            const candidate=this.build(id,total);
+            if (!candidate.errors && (plan.roundRules||[]).length===candidate.roundRules.length && candidate.roundRules.every(expected => {
+                const actual=(plan.roundRules||[]).find(r=>Number(r.roundNumber||r.round)===expected.roundNumber);
+                return (actual?.engine||actual?.method)===expected.engine;
+            })) return id;
+        }
+        return null;
     },
     applyToDivision(divisionId, presetId) {
         const division = DivisionService.getById(divisionId);
@@ -11028,7 +11031,7 @@ const App = {
                     ${finalConfigLocked?`<span class="block mt-1 text-amber-500">${this.ui('Final configuration is locked after the Tournament starts.','รูปแบบ Final ถูกล็อกหลังเริ่มการแข่งขัน')}</span>`:''}
                 </p>
             </div>
-            <div class="border-t pt-3 dark:border-gray-700"><label class="text-sm font-medium block mb-1" for="df-pairing-preset">Pairing Plan Preset</label><select id="df-pairing-preset" class="w-full px-3 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"><option value="">${divisionId?'— Keep current pairing plan —':'Manual (default)'}</option><option value="prp">PRP — R1 Random · R2 RGA · R3 KOTH · R4 RGA · R5 KOTH · R6+ KOTH</option></select><p class="text-xs text-gray-500 mt-1">${this.ui(
+            <div class="border-t pt-3 dark:border-gray-700"><label class="text-sm font-medium block mb-1" for="df-pairing-preset">Pairing Plan Preset</label><select id="df-pairing-preset" class="w-full px-3 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"><option value="">${divisionId?'— Keep current pairing plan —':'Manual (default)'}</option><option value="prp">PRP — R1 Random · R2 RGA · R3 KOTH · R4 RGA · R5 KOTH · R6+ KOTH</option><option value="round_robin">Round Robin — พบกันหมด (Division Preset)</option></select><p class="text-xs text-gray-500 mt-1">${this.ui(
     'Preset configuration is allowed only before this Division has pairing history. It never rewrites existing pairings or results.',
     'สามารถเลือกแผนจับคู่สำเร็จรูปได้เฉพาะก่อนที่ดิวิชันนี้จะมีประวัติการจับคู่ ระบบจะไม่เขียนทับการจับคู่หรือผลการแข่งขันที่มีอยู่แล้ว'
 )}</p></div>
@@ -11212,6 +11215,16 @@ const App = {
         if (resultPolicyUpdate.errors) { this.showToast(resultPolicyUpdate.errors[0], 'error'); return; }
 
         const pairingPreset = document.getElementById('df-pairing-preset')?.value || '';
+        if (pairingPreset === 'round_robin') {
+            const eligibleCount=RegistrationService.getEligible(savedDivision.divisionId).length;
+            if (eligibleCount >= 2) {
+                const cap=RoundRobinCapacityService.capacityForPlayerCount(eligibleCount);
+                if (Number(savedDivision.totalRounds)!==cap.cycleLength) {
+                    this.showToast(`Round Robin requires ${cap.cycleLength} rounds for ${eligibleCount} entries. Set Total Rounds accordingly.`, 'error');
+                    return;
+                }
+            }
+        }
         if (pairingPreset) {
             const presetResult = PairingPlanPresetService.applyToDivision(savedDivision.divisionId, pairingPreset);
             if (presetResult.errors) { this.showToast(presetResult.errors[0], 'error'); return; }
@@ -12837,10 +12850,12 @@ const App = {
         const round = RoundService.getById(roundId);
         const division = DivisionService.getById(divisionId);
         const plan = PairingPlanResolver.resolve(divisionId, round.roundNumber);
-        const engines = PairingEngineRegistry.identifiers().filter(e => e !== 'manual');
+        const engines = PairingEngineRegistry.identifiers().filter(e => e !== 'manual' && e !== 'round_robin');
+        const rrPresetActive = PairingPlanPresetService.detect((Storage.find('pairingPlans',p=>p.divisionId===divisionId&&p.status==='active').find(p=>p.pairingPlanId===division.pairingPlanId)),division.totalRounds)==='round_robin';
+        if (rrPresetActive) engines.unshift('round_robin');
         const body = `<form id="pairing-plan-form" class="space-y-3">
             <div><label class="text-sm font-medium block mb-1" for="plan-engine">${this.ui('Pairing method','วิธีจับคู่')}</label>
-                <select id="plan-engine" class="w-full px-3 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600" onchange="App.currentPairingProposal=null;App.currentAutomaticGibsonAcceptance=null;document.getElementById('pairing-preview').innerHTML=App.ui('Pairing method changed. Generate a new preview.','เปลี่ยนวิธีจับคู่แล้ว กรุณาดูตัวอย่างการจับคู่ใหม่');App.updatePairingMethodHelp();App.syncPairingPlanByeUI('${roundId}','${divisionId}')">${engines.map(e=>`<option value="${e}" ${e===plan.engine?'selected':''}>${Utils.escHtml(this.pairingEngineLabel(e))}</option>`).join('')}</select>
+                <select id="plan-engine" ${rrPresetActive?'disabled':''} class="w-full px-3 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600" onchange="App.currentPairingProposal=null;App.currentAutomaticGibsonAcceptance=null;document.getElementById('pairing-preview').innerHTML=App.ui('Pairing method changed. Generate a new preview.','เปลี่ยนวิธีจับคู่แล้ว กรุณาดูตัวอย่างการจับคู่ใหม่');App.updatePairingMethodHelp();App.syncPairingPlanByeUI('${roundId}','${divisionId}')">${engines.map(e=>`<option value="${e}" ${e===plan.engine?'selected':''}>${Utils.escHtml(this.pairingEngineLabel(e))}</option>`).join('')}</select>
                 <p id="plan-engine-help" class="text-xs text-gray-500 mt-1">${Utils.escHtml(this.pairingEngineHelp(plan.engine))}</p></div>
             <div id="plan-gibson-wrap" class="hidden p-3 rounded-lg border border-purple-500/40 bg-purple-500/10">
                 <label class="text-sm font-medium block mb-1" for="plan-gibson">${this.ui('Gibsonize / Award Gibson BYE (KOTH only)','กำหนด Gibson BYE (เฉพาะ KOTH)')}</label>
