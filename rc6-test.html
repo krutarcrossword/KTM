@@ -12843,9 +12843,9 @@ const App = {
     reopenPairings(roundId) {
         const round = RoundService.getById(roundId);
         if (!round) return;
-        const body = `<div class="space-y-3"><p>Reopen ${Utils.escHtml(round.roundLabel)} pairings for editing?</p><p class="text-sm text-amber-700">This is allowed only because no results have been entered. Existing pairings will become draft and can then be rearranged or cleared.</p></div>`;
+        const body = `<div class="space-y-3"><p>${this.ui('Reopen pairings for editing?','เปิดแก้ไขคู่แข่งขันหรือไม่?')} ${Utils.escHtml(round.roundLabel)}</p><p class="text-sm text-amber-700">${this.ui('No results have been entered. Pairings will return to draft. Published data stays unchanged until you publish again.','ยังไม่มีผลการแข่งขัน คู่แข่งขันจะกลับเป็นฉบับร่าง สามารถจัดใหม่หรือล้างได้ ข้อมูลสาธารณะจะยังคงเดิมจนกว่าจะเผยแพร่ใหม่')}</p></div>`;
         const actions = `<button onclick="App.closeModal()" class="px-4 py-2 border rounded-lg">${this.ui('Cancel','ยกเลิก')}</button><button onclick="App.doReopenPairings('${roundId}')" class="px-4 py-2 bg-amber-500 text-white rounded-lg">${this.ui('Reopen Pairings','เปิดแก้ไขคู่แข่งขัน')}</button>`;
-        this.showModal('Reopen Pairings', body, actions);
+        this.showModal(this.ui('Reopen Pairings','เปิดแก้ไขคู่แข่งขัน'), body, actions);
     },
 
     doReopenPairings(roundId) {
@@ -16613,7 +16613,7 @@ window.KTM_PB01 = {
     const wrap=document.createElement('div');wrap.id='ktm-pb01-modal';
     wrap.style.cssText='position:fixed;inset:0;z-index:999999;background:#000b;display:flex;align-items:center;justify-content:center;padding:20px';
     const panel=document.createElement('section');panel.style.cssText='background:#1e293b;color:white;border:1px solid #64748b;border-radius:14px;padding:22px;max-width:620px;width:100%;max-height:85vh;overflow:auto;font:15px system-ui';
-    const h=document.createElement('h2');h.textContent='PB02.1 — Public Board';h.style.cssText='font-size:20px;font-weight:700;margin-bottom:12px';panel.append(h);
+    const h=document.createElement('h2');h.textContent='PB03 — Public Board';h.style.cssText='font-size:20px;font-weight:700;margin-bottom:12px';panel.append(h);
     const info=document.createElement('p');info.textContent=t.tournamentName+' · Public Code: '+t.publicCode;panel.append(info);
     const caution=document.createElement('p');caution.style.cssText='background:#45331d;color:#ffe4a3;padding:12px;border-radius:8px;margin:12px 0';caution.textContent='ไฟล์ Snapshot อาจมีชื่อผู้แข่งขันและผลการแข่งขัน เลือกเฉพาะดิวิชันที่อนุญาตให้เผยแพร่ Export JSON ไม่ส่งข้อมูลขึ้น Firebase แต่ Publish Online จะเปิดข้อมูลให้บุคคลทั่วไปอ่านได้';panel.append(caution);
     const choices=document.createElement('div');choices.style.cssText='display:grid;gap:10px;margin:15px 0';
@@ -16675,7 +16675,11 @@ window.KTM_PB01 = {
     const matchRows=pairs.map(p=>{const r=byPair.get(p.pairingId);return {round:roundNums.get(p.roundId)||0,table:Number(p.tableNumber)||0,player1:names.get(p.player1Id)||{code:'',name:'—'},player2:names.get(p.player2Id)||{code:'',name:'BYE'},type:p.pairingType||'normal',result:r?{score1:r.player1Score??null,score2:r.player2Score??null,outcome1:r.player1Result||'',outcome2:r.player2Result||''}:null}}).sort((a,b)=>a.round-b.round||a.table-b.table);
     const official=FinalPlacementService.getCurrent(id);
     const placements=official?(official.rows||[]).map(r=>({rank:Number(r.rank),code:r.tournamentPlayerCode||'',name:r.playerName||'',school:r.schoolOrClub||'',placement:r.placement||''})):[];
-    return {code:d.divisionCode||'',name:d.divisionName||d.displayNameTh||'',rounds:rounds.map(r=>Number(r.roundNumber)).sort((a,b)=>a-b),matches:matchRows,officialPlacements:placements};
+    const lockedRounds=new Set(rounds.filter(r=>r.status==='locked').map(r=>Number(r.roundNumber)));
+    const latestByRound=new Map();
+    Storage.find('standingSnapshots',s=>s.divisionId===id && s.status==='current' && lockedRounds.has(Number(s.throughRound))).sort((a,b)=>Number(a.snapshotVersion||1)-Number(b.snapshotVersion||1)).forEach(s=>latestByRound.set(Number(s.throughRound),s));
+    const standingHistory=[...latestByRound.entries()].sort((a,b)=>a[0]-b[0]).map(([round,s])=>({round,rows:(s.rows||[]).map(r=>({rank:r.rank,code:names.get(r.playerId)?.code||'',name:names.get(r.playerId)?.name||r.playerName||'',school:r.schoolOrClub||'',gamesPlayed:r.gamesPlayed,wins:r.wins,ties:r.ties,losses:r.losses,matchPoints:r.matchPoints,scoreFor:r.scoreFor,scoreAgainst:r.scoreAgainst,spread:r.sumOfficialSpread}))}));
+    return {code:d.divisionCode||'',name:d.divisionName||d.displayNameTh||'',rounds:rounds.map(r=>Number(r.roundNumber)).sort((a,b)=>a-b),matches:matchRows,standingHistory,officialPlacements:placements};
   }
 };
 </script>
