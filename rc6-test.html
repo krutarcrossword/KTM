@@ -11161,11 +11161,11 @@ const App = {
                                 </div>
                                 <div class="mt-2 flex gap-2 flex-wrap" onclick="event.stopPropagation()">
                                     <button type="button" onclick="RC6PairingPreview.open(this.dataset.tournamentId)" data-tournament-id="${Utils.escHtml(t.tournamentId)}" class="text-xs px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-semibold">${this.ui('Preview Pairing · RC6.1A','ดูตัวอย่างคู่แข่งขัน · RC6.1A')}</button>
-                                    <button type="button" disabled class="text-xs px-2.5 py-1.5 rounded bg-sky-600 text-white opacity-50 cursor-not-allowed">${this.ui('Publish to Public Board','เผยแพร่ไป Public Board')}</button>
+                                    <button type="button" onclick="KTM_PB01.open(this.dataset.tournamentId)" data-tournament-id="${Utils.escHtml(t.tournamentId)}" class="text-xs px-2.5 py-1.5 rounded bg-sky-600 hover:bg-sky-700 text-white">${this.ui('Prepare Public Snapshot','เตรียมข้อมูลเผยแพร่')}</button>
                                     <button type="button" disabled class="text-xs px-2.5 py-1.5 rounded border border-sky-400 text-sky-700 dark:text-sky-300 opacity-50 cursor-not-allowed">${this.ui('Open Public Board','เปิด Public Board')}</button>
                                     <button type="button" disabled class="text-xs px-2.5 py-1.5 rounded border opacity-50 cursor-not-allowed">${this.ui('Show QR','ดู QR')}</button>
                                 </div>
-                                <div class="text-[11px] text-amber-600 dark:text-amber-300 mt-2">${this.ui('Facilitator only in RC5.10.29.2. Publishing, public.html and QR activation arrive in RC6.','RC5.10.29.2 เตรียมโครงไว้ก่อน ระบบเผยแพร่ public.html และ QR จะเปิดใช้งานใน RC6')}</div>
+                                <div class="text-[11px] text-amber-600 dark:text-amber-300 mt-2">${this.ui('PB01: export a reviewable JSON snapshot; cloud publishing is not enabled.','PB01: ส่งออกไฟล์ Snapshot เพื่อตรวจสอบก่อน ยังไม่เผยแพร่ขึ้นคลาวด์')}</div>
                             </div>
                         </div>
                         <span class="status-badge ${t.status==='archived'?'bg-red-100 text-red-700':'bg-gray-100 dark:bg-gray-700'}">${Utils.escHtml(statusLabel)}</span>
@@ -12823,6 +12823,7 @@ const App = {
         w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>RR Full Schedule</title><style>body{font:14px sans-serif;margin:24px;color:#111}h3{margin-top:24px}table{width:100%;border-collapse:collapse}td,th{border:1px solid #777;padding:6px;text-align:left}@media print{h3{break-after:avoid}table{break-inside:avoid}}</style></head><body><h2>${Utils.escHtml(d.divisionCode)} — Round Robin Full Schedule</h2><p>Left/right placement does not determine who starts.</p>${rows}
 
 
+<\/script>
 </body></html>`);
         w.document.close(); w.focus(); w.print();
     },
@@ -16570,6 +16571,8 @@ window.BackupService = BackupService;
 window.ExcelImportService = ExcelImportService;
 window.TestDataService = TestDataService;
 window.Storage = Storage;
+// PB01 read-only bridge: services are scoped inside the KTM core IIFE.
+window.KTM_PB01_SERVICES = Object.freeze({TournamentService,DivisionService,RegistrationService,RoundService,FinalPlacementService,CompetitionEntryService,Storage});
 window.CalcEngine = CalcEngine;
 window.SpreadLimitResolver = SpreadLimitResolver;
 window.PairingEngineRegistry = PairingEngineRegistry;
@@ -16598,6 +16601,83 @@ window.ByePolicyTests = ByePolicyTests;
 
 document.addEventListener('DOMContentLoaded', () => App.init());
 })();
+</script>
+<script>
+// KTM PB01 — explicitly approved, local-only snapshot EXPORT. Never writes Firebase.
+const {TournamentService,DivisionService,RegistrationService,RoundService,FinalPlacementService,CompetitionEntryService,Storage} = window.KTM_PB01_SERVICES;
+window.KTM_PB01 = {
+  open(tid) {
+    const t=TournamentService.getById(tid);
+    if(!t || !t.publicCode){alert('ไม่พบ Tournament หรือ Public Code');return;}
+    const ds=DivisionService.getByTournament(tid,'all').filter(d=>!['archived','cancelled'].includes(d.status));
+    const wrap=document.createElement('div');wrap.id='ktm-pb01-modal';
+    wrap.style.cssText='position:fixed;inset:0;z-index:999999;background:#000b;display:flex;align-items:center;justify-content:center;padding:20px';
+    const panel=document.createElement('section');panel.style.cssText='background:#1e293b;color:white;border:1px solid #64748b;border-radius:14px;padding:22px;max-width:620px;width:100%;max-height:85vh;overflow:auto;font:15px system-ui';
+    const h=document.createElement('h2');h.textContent='PB02.1 — Public Board';h.style.cssText='font-size:20px;font-weight:700;margin-bottom:12px';panel.append(h);
+    const info=document.createElement('p');info.textContent=t.tournamentName+' · Public Code: '+t.publicCode;panel.append(info);
+    const caution=document.createElement('p');caution.style.cssText='background:#45331d;color:#ffe4a3;padding:12px;border-radius:8px;margin:12px 0';caution.textContent='ไฟล์ Snapshot อาจมีชื่อผู้แข่งขันและผลการแข่งขัน เลือกเฉพาะดิวิชันที่อนุญาตให้เผยแพร่ Export JSON ไม่ส่งข้อมูลขึ้น Firebase แต่ Publish Online จะเปิดข้อมูลให้บุคคลทั่วไปอ่านได้';panel.append(caution);
+    const choices=document.createElement('div');choices.style.cssText='display:grid;gap:10px;margin:15px 0';
+    ds.forEach(d=>{const l=document.createElement('label');l.style.cssText='display:flex;gap:10px;align-items:center';const c=document.createElement('input');c.type='checkbox';c.value=d.divisionId;c.style.width='18px';l.append(c,document.createTextNode((d.divisionCode||'')+' — '+(d.divisionName||d.displayNameTh||'')));choices.append(l)});
+    panel.append(choices);
+    const buttons=document.createElement('div');buttons.style.cssText='display:flex;gap:12px;flex-wrap:wrap';
+    const exportBtn=document.createElement('button');exportBtn.textContent='ส่งออก Snapshot JSON';exportBtn.style.cssText='background:#0284c7;padding:10px 15px;border-radius:8px;color:white';
+    const closeBtn=document.createElement('button');closeBtn.textContent='ยกเลิก';closeBtn.style.cssText='border:1px solid #94a3b8;padding:10px 15px;border-radius:8px;color:white';
+    closeBtn.onclick=()=>wrap.remove();
+    exportBtn.onclick=()=>{
+      const ids=[...choices.querySelectorAll('input:checked')].map(x=>x.value);
+      if(!ids.length){alert('เลือกอย่างน้อย 1 Division');return;}
+      if(!confirm('ยืนยันส่งออก Snapshot ของ '+ids.length+' Division? ยังไม่ใช่การเผยแพร่ขึ้นออนไลน์'))return;
+      try {
+        const selected=ds.filter(d=>ids.includes(d.divisionId));
+        const out={schema:'ktm-public-snapshot-v1',publicCode:t.publicCode,tournament:{name:t.tournamentName,organizer:t.organizerName||'',startDate:t.startDate||'',endDate:t.endDate||''},publishedAt:new Date().toISOString(),divisions:selected.map(d=>this.buildDivision(d))};
+        const payload=JSON.stringify(out,null,2);
+        const blob=new Blob([payload],{type:'application/json;charset=utf-8'});
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement('a');a.href=url;a.download='ktm-public-'+t.publicCode+'.json';a.textContent='ดาวน์โหลด Snapshot JSON อีกครั้ง';
+        a.style.cssText='display:inline-block;color:#93c5fd;text-decoration:underline;margin-top:12px';
+        panel.append(a);
+        a.click();
+        const message=document.createElement('p');message.style.cssText='margin-top:12px;color:#86efac';
+        message.textContent='สร้าง Snapshot แล้ว ('+selected.length+' Division, '+out.divisions.reduce((n,d)=>n+d.matches.length,0)+' คู่แข่งขัน) หากเบราว์เซอร์ไม่ดาวน์โหลดอัตโนมัติ ให้คลิกลิงก์ด้านบน';
+        panel.append(message);
+        const preview=document.createElement('details');preview.style.cssText='margin-top:10px';
+        const summary=document.createElement('summary');summary.textContent='ตรวจสอบเนื้อหา JSON / คัดลอกได้';preview.append(summary);
+        const ta=document.createElement('textarea');ta.readOnly=true;ta.value=payload;ta.style.cssText='width:100%;height:160px;color:#111827;background:#fff;margin-top:8px;padding:8px';preview.append(ta);panel.append(preview);
+        setTimeout(()=>URL.revokeObjectURL(url),300000);
+        exportBtn.disabled=true;exportBtn.textContent='สร้าง Snapshot แล้ว';
+      } catch(error) {
+        console.error('PB01 Snapshot export failed',error);
+        alert('ส่งออก Snapshot ไม่สำเร็จ: '+(error?.message||String(error)));
+      }
+     };buttons.append(exportBtn,closeBtn);panel.append(buttons);
+    const online=document.createElement('div');online.style.cssText='margin-top:16px;display:flex;gap:8px;flex-wrap:wrap';panel.append(online);
+    const feedback=document.createElement('p');feedback.style.cssText='white-space:pre-wrap;margin-top:12px;overflow-wrap:anywhere';panel.append(feedback);
+    const controls=[];
+    function add(label,action){const b=document.createElement('button');b.type='button';b.textContent=label;b.style.cssText='background:#334155;border:1px solid #94a3b8;border-radius:8px;padding:9px';online.append(b);controls.push(b);b.onclick=async()=>{controls.forEach(x=>x.disabled=true);try{feedback.textContent='กำลังตรวจสอบ…';feedback.textContent=await action();}catch(e){feedback.textContent='ไม่สำเร็จ: '+e.message;}finally{controls.forEach(x=>x.disabled=false);}};return b;}
+    const api=()=>{if(!window.KTM_PB02)throw Error('Firebase ยังไม่พร้อม');return window.KTM_PB02;};
+    add('Publish / Update Online',async()=>{const ids=[...choices.querySelectorAll('input:checked')].map(x=>x.value);if(!ids.length)throw Error('เลือกอย่างน้อย 1 Division');const out={schema:'ktm-public-snapshot-v1',publicCode:t.publicCode,tournament:{name:t.tournamentName,organizer:t.organizerName||'',startDate:t.startDate||'',endDate:t.endDate||''},divisions:ds.filter(d=>ids.includes(d.divisionId)).map(d=>this.buildDivision(d))};if(!confirm('เผยแพร่ '+ids.length+' Division สู่สาธารณะ? จะแทนที่ Snapshot เดิมทั้งหมด'))return 'ยกเลิก';return api().publish(out);});
+    add('Unpublish',async()=>{if(!confirm('ระงับการเผยแพร่ '+t.publicCode+'?'))return 'ยกเลิก';return api().unpublish(t.publicCode);});
+    add('Copy Public URL',async()=>{const url=new URL('public.html?code='+encodeURIComponent(t.publicCode),location.href).href;if(location.protocol==='file:')return 'ต้องเปิดผ่าน HTTPS ก่อนใช้ URL สาธารณะ';await navigator.clipboard.writeText(url);return 'คัดลอกแล้ว: '+url;});
+    const del=add('Delete (Super Admin)',async()=>{if(prompt('ลบ Public Board ถาวร: พิมพ์ '+t.publicCode)!==t.publicCode)return 'ยกเลิก';return api().remove(t.publicCode);});del.hidden=true;
+    Promise.resolve().then(()=>api().access()).then(a=>{del.hidden=!a.admin;feedback.textContent=a.allowed?'พร้อมเผยแพร่ Online':'บัญชีนี้ไม่มีสิทธิ์ Publish';}).catch(e=>{feedback.textContent=e.message;});
+    wrap.append(panel);document.body.append(wrap);
+  },
+  buildDivision(d){
+    const id=d.divisionId;
+    const regs=RegistrationService.getByDivision(id);
+    const names=new Map(regs.map(r=>[r.playerId,{code:r.tournamentPlayerCode||'',name:CompetitionEntryService.compactName(r)}]));
+    const rounds=RoundService.getByDivision(id).filter(r=>['pairing_confirmed','in_progress','results_pending','completed','locked'].includes(r.status));
+    const allowed=new Set(rounds.map(r=>r.roundId));
+    const roundNums=new Map(rounds.map(r=>[r.roundId,Number(r.roundNumber)||0]));
+    const pairs=Storage.find('pairings',p=>p.divisionId===id && allowed.has(p.roundId));
+    const results=Storage.find('matchResults',r=>r.divisionId===id && allowed.has(r.roundId) && r.status==='locked');
+    const byPair=new Map(results.map(r=>[r.pairingId,r]));
+    const matchRows=pairs.map(p=>{const r=byPair.get(p.pairingId);return {round:roundNums.get(p.roundId)||0,table:Number(p.tableNumber)||0,player1:names.get(p.player1Id)||{code:'',name:'—'},player2:names.get(p.player2Id)||{code:'',name:'BYE'},type:p.pairingType||'normal',result:r?{score1:r.player1Score??null,score2:r.player2Score??null,outcome1:r.player1Result||'',outcome2:r.player2Result||''}:null}}).sort((a,b)=>a.round-b.round||a.table-b.table);
+    const official=FinalPlacementService.getCurrent(id);
+    const placements=official?(official.rows||[]).map(r=>({rank:Number(r.rank),code:r.tournamentPlayerCode||'',name:r.playerName||'',school:r.schoolOrClub||'',placement:r.placement||''})):[];
+    return {code:d.divisionCode||'',name:d.divisionName||d.displayNameTh||'',rounds:rounds.map(r=>Number(r.roundNumber)).sort((a,b)=>a-b),matches:matchRows,officialPlacements:placements};
+  }
+};
 </script>
 
 <!-- RC6.1A: read-only pairing preview. Does not mutate tournament data. -->
@@ -16758,7 +16838,7 @@ window.addEventListener('orientationchange', krutarVenueRefit, {passive:true});
 <script type="module">
 import { initializeApp, getApps } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
-import { getFirestore, doc, getDoc, collection, getDocs, query, limit, setDoc, serverTimestamp, writeBatch, updateDoc } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
+import { getFirestore, doc, getDoc, getDocFromServer, runTransaction, deleteDoc, collection, getDocs, query, limit, setDoc, serverTimestamp, writeBatch, updateDoc } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
 const $ = id => document.getElementById(id);
 const panel=$('rc6auth-panel'), status=$('rc6auth-status');
 const accountLogin=$('ktm-account-login'), accountAvatar=$('ktm-account-avatar'), accountMenu=$('ktm-account-menu');
@@ -16852,12 +16932,22 @@ function connectFirebase(){
    $('rc6f-refresh').disabled=!user;
    if(user) refreshMember(user); else $('rc6f-member-status').textContent='เข้าสู่ระบบเพื่อตรวจสอบสถานะ';
    adminVerified=false;$('rc6j-admin').hidden=true;$('rc6j-list').textContent='กดโหลดคำขอ';$('rc6k-admin').hidden=true;$('rc6k-list').textContent='กดโหลดรายชื่อสมาชิก';
-   if(user) setStatus('Google Sign-in สำเร็จ\nUID: '+user.uid+'\nEmail: '+(user.email||'-')+'\nDisplay name: '+(user.displayName||'-')+'\n\nยังไม่มีสิทธิ์ Publish หรือเขียน Firestore');
+   if(user) setStatus('Google Sign-in สำเร็จ\nUID: '+user.uid+'\nEmail: '+(user.email||'-')+'\nDisplay name: '+(user.displayName||'-')+'\n\nPublic Board: ตรวจสอบสิทธิ์ manage ก่อน Publish');
    else setStatus('เชื่อมต่อ Firebase แล้ว · ยังไม่ได้เข้าสู่ระบบ');
   },e=>setStatus('Auth state error: '+e.message));
  }catch(e){setStatus('Connect error: '+e.message)}
 }
 // RC6.1H Step 1: initialize the public Firebase web config on each page load.
+
+// PB02.1: reuse authenticated Firebase instance; server rules are authoritative.
+window.KTM_PB02=Object.freeze({
+ async access(){const u=auth?.currentUser;if(!u||!db)throw Error('เข้าสู่ระบบ Google ก่อน');const m=(await getDocFromServer(doc(db,'members',u.uid))).data()||{};if(auth?.currentUser?.uid!==u.uid)throw Error('บัญชีเปลี่ยน');const admin=u.uid==='R4jg0jcF3NhGQWSgD8g06b9Nw3n1'||(m.role==='super_admin'&&m.status==='active');const now=Date.now();const end=m.membershipEndsAt?.toMillis?.();const start=m.trialStartedAt?.toMillis?.();const valid=end!=null?now<end: m.trialUsed===true&&start!=null&&start<=now&&now<start+30*86400000;return {uid:u.uid,admin,allowed:admin||(m.role==='member'&&m.status==='active'&&m.permissions?.manage===true&&valid)};},
+ ref(code){if(!/^[A-Z0-9]{6}$/.test(code))throw Error('Public Code ไม่ถูกต้อง');return doc(db,'publicBoards',code);},
+ async publish(out){const a=await this.access();if(!a.allowed)throw Error('ไม่มีสิทธิ์ manage หรือหมดอายุ');const ref=this.ref(out.publicCode);const payload=JSON.stringify(out);if(new TextEncoder().encode(payload).length>850000)throw Error('Snapshot ใหญ่เกิน 850 KB');await runTransaction(db,async tx=>{const old=await tx.get(ref);if(old.exists()&&!a.admin&&old.data().ownerUid!==a.uid)throw Error('Public Code เป็นของบัญชีอื่น');tx.set(ref,{schema:out.schema,publicCode:out.publicCode,ownerUid:old.exists()?old.data().ownerUid:a.uid,publishedBy:a.uid,publishedAt:serverTimestamp(),published:true,snapshotJson:payload});});return 'Publish สำเร็จ: '+out.publicCode;},
+ async unpublish(code){const a=await this.access();if(!a.allowed)throw Error('ไม่มีสิทธิ์');const ref=this.ref(code);await runTransaction(db,async tx=>{const old=await tx.get(ref);if(!old.exists())throw Error('ไม่พบ Board');if(!a.admin&&old.data().ownerUid!==a.uid)throw Error('ไม่ใช่เจ้าของ');tx.update(ref,{published:false,publishedBy:a.uid,publishedAt:serverTimestamp()});});return 'Unpublish สำเร็จ';},
+ async remove(code){const a=await this.access();if(!a.admin)throw Error('Super Admin เท่านั้น');await deleteDoc(this.ref(code));return 'Delete สำเร็จ';}
+});
+
 connectFirebase();
 $('rc6auth-connect').onclick=connectFirebase;
 $('rc6auth-signin').onclick=async()=>{
